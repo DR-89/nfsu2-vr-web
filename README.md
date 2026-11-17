@@ -1,3 +1,17 @@
+# nfsu2-vr-web
+
+**Play in your browser: [nfsu2vr.xyz](https://nfsu2vr.xyz)**
+
+Independent VR and multiplayer fork of [th0mk/nfsu2-web](https://github.com/th0mk/nfsu2-web), based on public revision `9e0230212776f6c9a4d0db30c1963e9730138553`. Upstream and mod author credits and licenses below are preserved.
+
+The port is in development. See [VR port status](docs/VR_PORT.md) for implemented components, limitations and acceptance checks. The original desktop mode remains supported. The [native feature inventory](docs/VR_PARITY.md) tracks the full mod target; CopChase is deferred. The upstream archive notice below describes the original project.
+
+Windows/WSL launcher: `tools/start-vr-web.ps1 -GameData '<your PC game folder>'`.
+It builds a private browser data copy, including the audio packed in `SDATA/sdat.viv`,
+and serves the project locally on port 8611. See the VR status document for prerequisites.
+
+## Upstream project
+
 # Need for Speed: Underground 2 in the browser
 
 > [!IMPORTANT]
