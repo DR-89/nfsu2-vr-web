@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const LIFT = 'FLAGABI X87OPT JTSWITCH LREGS FTOL2INL INLINE_LIST';
@@ -36,15 +36,19 @@ const node = (args, env = process.env) => new Promise(res => {
   c.on('exit', () => clearTimeout(t));
   let out = '', err = '';
   c.stdout.on('data', d => { out += d; }); c.stderr.on('data', d => { err += d; });
-  c.on('exit', code => res({ code, out, err }));
+  c.on('error', error => {clearTimeout(t);res({code:null,out,err:String(error)});});
+  c.on('close', code => res({ code, out, err }));
 });
 
 test('moduleLine: the module the server sends, in one line', async t => {
   let json = '';
   const base = await standIn(t, () => json);
-  const line = async b => JSON.parse((await node(['--input-type=module', '-e',
-    `import { moduleLine } from ${JSON.stringify(path.join(REPO, 'web/tools/dev-server.mjs'))}; ` +
-    `console.log(JSON.stringify(await moduleLine(${JSON.stringify(b)})));`])).out);
+  const line = async b => {
+    const r=await node(['--input-type=module', '-e',
+      `import { moduleLine } from ${JSON.stringify(pathToFileURL(path.join(REPO, 'web/tools/dev-server.mjs')).href)}; ` +
+      `console.log(JSON.stringify(await moduleLine(${JSON.stringify(b)})));`]);
+    assert.equal(r.code,0,r.err);return JSON.parse(r.out);
+  };
   // nfsu2.json as web/build.sh writes it, with the hash the server adds
   json = JSON.stringify({ pages: 16384, maxPages: 65536, rev: '4eda10d+', size: 35657931, opt: '-O3', lift: LIFT, module: 'AbC-12_x' });
   assert.equal(await line(base), `module: rev 4eda10d+, lift ${LIFT}, hash AbC-12_x`);

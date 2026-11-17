@@ -103,10 +103,13 @@ void sub_005c7ab0(CPU *c){
         for (int k = 0; k < split_render_limit(); ++k){
             split_rain_seat = split_post_seat = k;
             split_post_log(2, k);
-            *c = before; sub_005c7ab0_orig(c); after = *c;
+            *c = before;
+            if(!vr_web_skip_lens_rain(c,split_view_id(k)))sub_005c7ab0_orig(c);
+            after = *c;
         }
         split_rain_seat = split_post_seat = -1; *c = after; return;
     }
+    if(vr_web_skip_lens_rain(c,1u))return;
 #endif
     sub_005c7ab0_orig(c);
 }

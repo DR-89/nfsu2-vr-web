@@ -145,6 +145,16 @@ impl Core {
         self.lobby.peer_gone(vip, now);
         self.purge();
     }
+    pub fn peer_resumed(&mut self, vip: u32) {
+        self.here.insert(vip);
+        for game in self.lobby.games.values_mut() {
+            for p in &mut game.players {
+                if p.vip == vip {
+                    p.avatar_connected = true;
+                }
+            }
+        }
+    }
 
     /// what left or ended during the event is let go
     pub fn purge(&mut self) {
@@ -218,6 +228,9 @@ impl Core {
     /// the browsers in Online mode now (the ones info() counts)
     pub fn vips(&self) -> HashSet<u32> {
         self.lobby.vips(&self.here)
+    }
+    pub fn avatar_links(&self, vips: &[u32]) -> nfsu2_util::host::AvatarLinks {
+        self.lobby.avatar_links(&self.here, vips)
     }
 
     /// the server stops: the lobby's links go, the files are written, the timers end

@@ -8,6 +8,8 @@
 /* Every frame on the game thread (roam.c's main-loop hook): reads the local
  * players' cars and sets their whines' pitches and volumes. */
 void whine_frame(void);
+/* Game thread: fade off immediately; load lazily on first enable. */
+void whine_set_enabled(int enabled);
 /* Adds the whines to an interleaved stereo float mix.  Mixer thread. */
 void whine_mix(float *acc, unsigned frames, unsigned rate);
 #endif

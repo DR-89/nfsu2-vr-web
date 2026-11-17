@@ -162,6 +162,10 @@ static void read_tracks(const char *name){
 static void open_pack(const char *env){
     const char *v = getenv(env);
     if (!v || !*v || !strcasecmp(v, "original") || g_npacks == MAXPACKS) return;
+    if (!strcmp(env, "NFSU2_UI_TEXTURES")){
+        if (!strcasecmp(v, "map")) return;
+        if (!strcasecmp(v, "hud")) v = "uhud";
+    }
     Pack *p = &g_packs[g_npacks];
     size_t k = 0;
     for (; v[k] && k + 1 < sizeof p->name; k++){

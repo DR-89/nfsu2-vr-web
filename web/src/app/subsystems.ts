@@ -6,6 +6,7 @@
 //   net       web/src/net    the server's virtual LAN, only with free roam on (its link in a worker: net/remote.ts)
 // Each module's own handle has detach(); the adapters pass the options the
 // shell owns and pick the counters the detailed overlay shows.
+import { vrSettings } from '../vr/settings';
 import { attachRenderer as gpuAttach } from '../gpu/index';
 export { OtherBuild } from '../gpu/index';
 import { attachAudio as audioAttach } from '../audio/index';
@@ -19,9 +20,11 @@ export type {
 } from './contract';
 
 export const attachRenderer: AttachRenderer = async (proc, canvas, o) => {
-  const r = await gpuAttach(proc, canvas, { log: o.log, artifacts: o.artifacts, dumpScale: o.dumpScale, onLost: o.onLost, onMarks: o.onMarks,
-    pixelated: o.env.NFSU2_PIXELATED_TEXTURES === '1', aniso: o.env.NFSU2_ANISOTROPIC === '1' });
+  const r = await gpuAttach(proc, canvas, { avatars: o.avatars, cockpit: o.cockpit, vrSettings: o.cockpit?.settings ?? vrSettings(o.env), log: o.log, artifacts: o.artifacts, dumpScale: o.dumpScale, onLost: o.onLost, onMarks: o.onMarks,
+    pixelated: o.env.NFSU2_PIXELATED_TEXTURES === '1', aniso: o.env.NFSU2_ANISOTROPIC === '1',
+    vrFrameRate: o.env.NFSU2_FPS === '120' || o.env.NFSU2_FPS === '240' ? 120 : 90 });
   return {
+    vr: r.vr,
     detach: () => r.detach(),
     imageRect: () => r.imageRect(),
     dump: (name: string, mark?: boolean) => r.dump(name, mark),
@@ -38,25 +41,27 @@ export const attachRenderer: AttachRenderer = async (proc, canvas, o) => {
 };
 
 export const attachAudio: AttachAudio = async (proc, o) => {
-  const a = await audioAttach(proc, { context: o.context, log: o.log });
-  return { detach: () => a.detach(), stats: () => a.stats(), state: () => a.context?.state ?? 'closed' };
+  const a = await audioAttach(proc, { context: o.context, log: o.log, masterGainDB:o.masterGainDB });
+  return { detach: () => a.detach(), stats: () => a.stats(), state: () => a.context?.state ?? 'closed', shiftClick:()=>a.shiftClick() };
 };
 
 export const attachInput: AttachInput = (proc, element, o) =>
   inputAttach(proc, element, { log: o.log, viewRect: o.viewRect, toggleFullscreen: o.toggleFullscreen, padPage: o.padPage });
 
 export const attachNet: AttachNet = (proc, o) => {
-  const link = netAttach(proc, { name: o.name, id: o.id, was: o.was, claim: o.claim, block: o.block, log: o.log, onNotice: o.notice, onLobby: o.lobby, onSay: o.say, onBump: o.bump, onBattle: o.battle, onCoop: o.coop, onFriend: o.friend, onBack: o.back,
+  const link = netAttach(proc, { onMod: o.mod, name: o.name, id: o.id, was: o.was, claim: o.claim, block: o.block, log: o.log, onNotice: o.notice, onLobby: o.lobby, onSay: o.say, onBump: o.bump, onBattle: o.battle, onCoop: o.coop, onFriend: o.friend, onBack: o.back,
     onQueue: o.queue, onRemoved: o.removed, onRaces: o.races, onRename: o.rename });
   const friends = () => link.peers.filter(p => !p.self);
   return {
     detach: () => link.close(),
     vip: () => link.vip,
+    mod: m => link.mod(m),
     peers: () => friends().map(p => `${p.name} (${p.vip})`),
     holding: () => link.state === 'connecting' || link.state === 'online' || link.state === 'offline' || link.state === 'queued',
     away: (on: boolean) => link.setAway(on),
     offline: () => link.goOffline(),
     rename: (name: string) => link.rename(name),
+    profile:profile=>link.profile(profile),
     solid: (collide: 'on' | 'off' | 'none') => link.setSolid(collide),
     say: (p: number, race?: boolean) => link.say(p, race),
     friend: (m: Record<string, unknown>) => link.friend(m),

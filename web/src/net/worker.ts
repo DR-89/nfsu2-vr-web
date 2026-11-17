@@ -126,7 +126,8 @@ me.onmessage = (e: MessageEvent<ToNet>) => {
     // (the link closes as the game's end resolves, before this)
     void Promise.resolve().then(() => { tell(); closing(); });
   } else if (m.t === 'call' && link) {
-    (link[m.m] as (...a: unknown[]) => unknown).apply(link, m.a);
+    const result=(link[m.m] as (...a: unknown[]) => unknown).apply(link, m.a);
+    if(m.m==='profile'&&m.id!==undefined){const l=link,id=m.id;void Promise.resolve(result).then(ok=>post({t:'profile',id,accepted:ok===true,now:nowOf(l,false)}));}
     tell();
     if (m.m === 'close') closing();
   }

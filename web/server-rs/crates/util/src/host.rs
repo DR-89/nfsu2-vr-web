@@ -131,6 +131,18 @@ pub type SwitchSend = Arc<dyn Fn(u32, Bytes, Option<&dyn Charge>) -> SendResult 
 /// The dev trace (--online-trace): sees frames (any kind; it picks the lobby's TCP streams).
 pub type Tap = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
+/// Avatar visibility for the requested browser addresses only. A managed
+/// browser cannot fall back to a client-selected LAN group. Each pair is
+/// (sender, receiver), preserving one-way discovery links in free roam.
+#[derive(Clone, Default)]
+pub struct AvatarLinks {
+    pub managed: HashSet<u32>,
+    pub pairs: Vec<(u32, u32)>,
+    /// Exact free-roam source endpoints: (sender, receiver, car id). Online
+    /// uses `pairs` with car zero; co-op's two cars must never share a grant.
+    pub cars: Vec<(u32, u32, u32)>,
+}
+
 /// A host on the switch.  Every method returns at once (the work happens on the host's own thread); `info` and
 /// `vips` answer through a channel once the host has handled everything posted before them.
 pub trait Host: Send + Sync + 'static {
@@ -144,6 +156,9 @@ pub trait Host: Send + Sync + 'static {
     fn frame(&self, from: u32, data: Bytes, ctx: FrameCtx);
     /// browser `vip` left the switch
     fn peer_gone(&self, vip: u32);
+    /// The switch verified the private token for this address. Only that
+    /// reconnect may restore a race's avatar grant after a transport break.
+    fn peer_resumed(&self, _vip: u32) {}
     /// counts for the tests and the console, as JSON
     fn info(&self) -> oneshot::Receiver<serde_json::Value>;
     /// the browsers this host counts as its players now
@@ -166,6 +181,11 @@ pub trait Host: Send + Sync + 'static {
     fn link_pairs(&self) -> oneshot::Receiver<Vec<(u32, u32)>> {
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(Vec::new());
+        rx
+    }
+    fn avatar_links(&self, _vips: Vec<u32>) -> oneshot::Receiver<AvatarLinks> {
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(AvatarLinks::default());
         rx
     }
     /// the server stops: save what is kept, end the timers

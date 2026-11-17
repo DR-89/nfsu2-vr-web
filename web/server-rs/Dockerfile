@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # NFS Underground 2 in the browser: the server (web/server-rs) as a container image (web/deploy/compose.yml).
 #
-#   docker build -f web/server-rs/Dockerfile -t nfsu2-web-rs .
+#   docker build -f web/server-rs/Dockerfile -t nfsu2-vr-web:local .
 #
 # The image holds the server (one static binary) and the page (web/dist, without the test pages and source maps).  It
 # never holds the game or anything made from it (this Dockerfile's .dockerignore lets only the server's and the page's
@@ -63,10 +63,12 @@ COPY --from=server /nfsu2-server-$TARGETARCH /nfsu2-server
 
 FROM alpine:3.22
 ARG TARGETARCH
-LABEL org.opencontainers.image.title="nfsu2-web-rs" \
+LABEL org.opencontainers.image.title="nfsu2-vr-web" \
       org.opencontainers.image.description="NFS Underground 2 in the browser: the server, in Rust (bring your own game)" \
       org.opencontainers.image.licenses="MIT"
 WORKDIR /app
+COPY LICENSE ./LICENSE
+COPY licenses ./licenses
 COPY --from=page /src/web/dist web/dist
 COPY --from=server /nfsu2-server-$TARGETARCH /app/nfsu2-server
 COPY --from=page --chown=1000:1000 --chmod=700 /state /state

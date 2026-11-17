@@ -14,6 +14,9 @@ void garage_split_keep(CPU *c);            /* garage.c: slots 6-10 aside for the
 #include "gamepad.h"
 #include "kbd.h"
 #include "coop.h"
+#ifdef __wasm__
+#include "web/vr_web.h"
+#endif
 
 /* the labels shown (split_label_text: in the game's language) */
 enum { SL_SPLIT, SL_PLAYERS, SL_PLAYER, SL_PLAYER_UP, SL_JOIN, SL_JOIN_KB, SL_JOIN_SP, SL_N };
@@ -60,6 +63,7 @@ uint32_t split_guest_addr(uint32_t a){
 }
 static uint32_t split_view(int id){ return 0x832de0u + (uint32_t)id * 0x70u; }
 static int split_current_view;
+int split_render_view(void){ return split_current_view; }
 static int split_streak_full_copy, split_streak_composite;
 #define SPLIT_TARGETS 0x00d03000u
 static SplitCell split_cell(int seat){
@@ -1564,6 +1568,7 @@ void sub_005c21e0_orig(CPU *c);
 void sub_005c21e0(CPU *c){
     sub_005c21e0_orig(c);
 #ifdef __wasm__
+    void vr_web_views(void);vr_web_views();
     /* the reflection view's target and views 4 and 9 as the game had them before a split race, put back after it
      * (single player's road reflection keeps its own size and settings) */
     static int kept; static uint32_t kept_rt, kept_size[3]; static uint8_t kept_on[2];
@@ -1846,6 +1851,9 @@ int splitscreen_hook(CPU *c, uint32_t ip){
         return 1;
     }
     if (ip == 0x5b9caau){
+#ifdef __wasm__
+        vr_web_world_lists(c->esi);
+#endif
         if (split_racing()) split_return_count=0;
         split_sync_settings(0);
         split_map_huds(c);

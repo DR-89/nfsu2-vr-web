@@ -52,12 +52,12 @@ macro_rules! csp_head {
 }
 macro_rules! csp_mid {
     () => {
-        "; worker-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'"
+        "; worker-src 'self'; connect-src 'self' http://127.0.0.1:*; img-src 'self' data: blob:; style-src 'self'"
     };
 }
 macro_rules! csp_tail {
     () => {
-        "; font-src 'self'; media-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; \
+        "; font-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; \
          frame-src 'none'; frame-ancestors 'none'"
     };
 }
@@ -71,11 +71,12 @@ pub const CSP_TURNSTILE: &str = concat!(
     csp_head!(),
     " https://challenges.cloudflare.com",
     csp_mid!(),
-    "; font-src 'self'; media-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; \
+    "; font-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'self'; \
      frame-src https://challenges.cloudflare.com; frame-ancestors 'none'"
 );
 
-/// The policy with a page's own hashes in script-src and style-src.  Everything comes from this origin.
+/// The policy with a page's own hashes in script-src and style-src. Assets come from this origin;
+/// loopback connections support the opt-in PCVR haptics starter, with its per-run token and Origin check.
 /// WebAssembly needs 'wasm-unsafe-eval' (compiling the module, in the page and in its workers, whose scripts carry
 /// this header too).  'self' covers the module workers, the audio worklet and the /lan WebSocket (CSP 3: ws: and
 /// wss: to this host).  Images: the favicon is a data: URL; screenshots in the Saves panel may be blob: URLs.  No
@@ -108,15 +109,15 @@ pub fn sha256_source(text: &str) -> String {
 /// click first, the screen kept on while a game runs (a controller's buttons do not keep every system's
 /// screen awake), the motion sensor for the touch controls' tilt steering (the device orientation events
 /// need accelerometer and gyroscope), and WebHID for Valve's controllers, which are no gamepads to the
-/// browsers (web/src/input/steampad.ts; only those the player picked in the browser's list).  The rest is
-/// switched off for this page and anything it could embed.
+/// browsers (web/src/input/steampad.ts; only those the player picked in the browser's list), and WebXR
+/// headset tracking for immersive VR.  The rest is switched off for this page and anything it could embed.
 pub const PERMISSIONS_POLICY: &str = concat!(
     "gamepad=(self), fullscreen=(self), keyboard-map=(self), autoplay=(self), cross-origin-isolated=(self), ",
     "screen-wake-lock=(self), accelerometer=(self), gyroscope=(self), hid=(self), ",
     "bluetooth=(), browsing-topics=(), camera=(), clipboard-read=(), display-capture=(), ",
     "encrypted-media=(), geolocation=(), idle-detection=(), local-fonts=(), ",
     "magnetometer=(), microphone=(), midi=(), payment=(), publickey-credentials-get=(), ",
-    "serial=(), usb=(), window-management=(), xr-spatial-tracking=()",
+    "serial=(), usb=(), window-management=(), xr-spatial-tracking=(self)",
 );
 
 /// [`PERMISSIONS_POLICY`]

@@ -3,9 +3,11 @@
 // modules (web/src/gpu, web/src/audio, web/src/input, web/src/net) to these
 // shapes.  See web/src/host/abi.ts for the shared-memory side (nfsu2_register
 // kinds).
+import type { ModRequest, ModEvent } from '../vr/protocol';
+import type { ImmersiveSession } from '../vr/session';
 import type { GameProcess } from '../host/process';
 import type { PhotoLook } from '../gpu/photo-picture';
-import type { PadPage, TouchPad } from '../input/gamepad';
+import type { PadPage, TouchPad, SpatialPad, SpatialFeedback } from '../input/gamepad';
 import type { TextEntry } from '../input/index';
 import type { NetQueue, NetRaces, NetRemoved, NetRename } from '../net';
 
@@ -18,6 +20,8 @@ export interface CommonOptions {
 }
 
 export interface RendererOptions extends CommonOptions {
+  cockpit?: import('../vr/cockpit').Cockpit;
+  avatars?: () => ReadonlyMap<number, import('../vr/multiplayer').RemoteAvatar>;
   /** NFSU2_WIDTH/HEIGHT the game was started with: the canvas size in device pixels at Play */
   width: number; height: number;
   /** measured display refresh rate (rAF), Hz */
@@ -35,6 +39,7 @@ export interface RendererOptions extends CommonOptions {
 }
 
 export interface AudioOptions extends CommonOptions {
+  masterGainDB?:()=>number;
   /**
    * Created and resumed inside the Play click (a user gesture), with the
    * latencyHint from settings (audio_latency).  The audio subsystem plays into
@@ -55,6 +60,7 @@ export interface InputOptions extends CommonOptions {
 }
 
 export interface NetOptions extends CommonOptions {
+  mod?(event: ModEvent): void;
   /** the name other browsers see on the server's LAN */
   name: string;
   /** a line for the player from the game (a friend joined, left, went into a race) */
@@ -102,6 +108,7 @@ export interface Subsystem {
 }
 
 export interface RendererSubsystem extends Subsystem {
+  vr?: ImmersiveSession;
   /** the game's image inside the canvas, in canvas pixels */
   imageRect(): { x: number; y: number; w: number; h: number };
   /** tests, F12: the next frame as PNG (also uploaded as <name>.png with RendererOptions.artifacts); mark: the
@@ -122,11 +129,14 @@ export interface RendererSubsystem extends Subsystem {
 }
 
 export interface AudioSubsystem extends Subsystem {
+  shiftClick?():void;
   /** the AudioContext's state: 'running' once sound can play */
   state(): string;
 }
 
 export interface InputSubsystem extends Subsystem {
+  /** XR focus overrides the normal window while a session exists; null restores it. */
+  immersiveFocus?(visible: boolean | null): void;
   /** ask the game to quit through its own path (WM_CLOSE, lifecycle_request_quit).  A request
    *  made before the game's input is up is sent when it is.  false: it cannot reach the game */
   requestQuit?(): boolean;
@@ -160,6 +170,8 @@ export interface InputSubsystem extends Subsystem {
   key?(code: string, down: boolean): void;
   /** the touch controls' virtual controller, merged with a real one (null: none) */
   touchPad?(t: TouchPad | null): void;
+  spatialPad?(p: SpatialPad | null): void;
+  vrFeedback?(p:SpatialFeedback|null):void;
   /** the touch controls' level horizon: the phone's tilt the game's 3D view turns against, radians, + = clockwise */
   viewRoll?(rad: number): void;
   /** the menus' small buttons' size, 1 = the game's own (touch.ts: the Menu button size): the scroller arrows', and
@@ -174,6 +186,8 @@ export interface InputSubsystem extends Subsystem {
 }
 
 export interface NetSubsystem extends Subsystem {
+  profile?(profile:import('../net/index').NetProfile|null):Promise<boolean>;
+  mod?(message: ModRequest): boolean;
   /** this browser's address on the server's LAN, once connected */
   vip(): string | null;
   /** the other browsers on the server's LAN */

@@ -25,6 +25,10 @@ export function phoneScreen(touchPoints: number, w = screen.width, h = screen.he
 
 export function touchFirst(): boolean { return matchMedia('(pointer: coarse)').matches; }
 
+/** Quest Browser reports Linux x86_64 and a fine pointer even on a standalone
+ * ARM headset. Do not allocate the desktop heap and graphics defaults there. */
+export const isQuestBrowser = (ua = navigator.userAgent) => /\bOculusBrowser\//.test(ua);
+
 /** settings.ini keys whose default is another on this device: what applies when neither the file nor the page
  *  address sets them.  Phones: 75% resolution scale (a phone's screen has more pixels than its GPU fills at 60 fps),
  *  or 100% once the render check found room to spare on this one (rendercheck.ts), full screen (no browser bars
@@ -45,6 +49,7 @@ export function touchFirst(): boolean { return matchMedia('(pointer: coarse)').m
  *  (the page can paint them only with BC compression, gpu/hqskin.ts): the game's designs and colours, sharper; up to
  *  16 skins of 1024 at once (gpu/encoder.ts OVER_MAX), each ~5.3 MB of graphics memory with its mips. */
 export function deviceDefaults(): Record<string, string> {
+  if (isQuestBrowser()) return { roam_max_cars: '16', roam_map_max: '2048', coop: 'off', fsaa: 'off', anisotropic: 'off', hq_vinyls: 'off' };
   const kind = deviceKind();
   if (kind === 'phone') return { render: rememberedRender() === 'backing' ? 'backing' : 'scale:0.75', fullscreen: fullScreenFails() ? 'off' : 'on', hud: '43', roam_max_cars: '16', roam_map_max: '2048', coop: 'off', fsaa: 'off', anisotropic: 'off', hq_vinyls: 'off' };
   if (kind === 'tablet') return { roam_max_cars: '24', coop: 'off', anisotropic: 'off', hq_vinyls: 'off' };
@@ -68,7 +73,7 @@ export const fsaaFails = (g = graphics) => /^(amd gcn-5|qualcomm)\b/i.test(g);
 
 /** the device as its defaults see it: a phone, a touch-first one that is not a phone (a tablet), or a computer */
 export function deviceKind(): 'phone' | 'tablet' | 'pc' {
-  return isPhone() ? 'phone' : touchFirst() ? 'tablet' : 'pc';
+  return isQuestBrowser() ? 'tablet' : isPhone() ? 'phone' : touchFirst() ? 'tablet' : 'pc';
 }
 
 /** The guest heap's window (runtime/guest_span.h): the game's memory 2 GB from the start, 768 MB more of it for the
@@ -83,7 +88,7 @@ export function heapWindow(kind = deviceKind(), ua = navigator.userAgent,
   const safari = /AppleWebKit\//.test(ua) && !/Chrome\/|Chromium\/|Firefox\//.test(ua);
   // (an Android tablet with a mouse, or a phone on a desktop screen (DeX), reads as a computer: its platform says Android)
   const android = platform === 'Android' || /Android/.test(ua);
-  return kind === 'pc' && !safari && !android && (memoryGB === undefined || memoryGB >= 8);
+  return kind === 'pc' && !safari && !android && !isQuestBrowser(ua) && (memoryGB === undefined || memoryGB >= 8);
 }
 
 /** the render check's verdict on this phone: in this browser only, like the other device defaults (settings.ini,

@@ -2,5 +2,7 @@
 import './app/started';
 import './app/style.css';
 import { boot } from './app/shell';
+import {prepareNativeHaptics} from './vr/native-haptics';
 
+prepareNativeHaptics();
 void boot();

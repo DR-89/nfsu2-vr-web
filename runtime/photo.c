@@ -1360,6 +1360,20 @@ void sub_0048acb0(CPU *c){
     if (!P.game_lod && (int32_t)c->eax < SIZE_FULL) c->eax = SIZE_FULL;
 }
 void sub_006162e0_orig(CPU *c);
+/* The stock car renderer skips a shell when its camera lies inside the box.
+ * A seated VR camera needs that shell (hood, pillars and roof). Keep the
+ * original point-in-box test everywhere else, including photo mode. */
+void sub_0043d7a0_orig(CPU *c);
+void sub_0043d7a0(CPU *c){
+#ifdef __wasm__
+    int vr_web_inside_body(uint32_t, uint32_t, uint32_t);
+    int keep_body = vr_web_inside_body(guest_rd32(c->esp), guest_rd32(c->esp + 4u), guest_rd32(c->esp + 8u));
+#endif
+    sub_0043d7a0_orig(c);
+#ifdef __wasm__
+    if (keep_body) c->eax = 0;
+#endif
+}
 __attribute__((weak)) void carpaint_draw(uint32_t ri);     /* carpaint.c: the car's tips, calipers and rims, its own paint */
 __attribute__((weak)) void carpaint_drawn(void);
 uint32_t plates_begin(uint32_t ri);               /* plates.c: the car's own license plate while it is drawn */

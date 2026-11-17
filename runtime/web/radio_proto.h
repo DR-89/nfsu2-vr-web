@@ -9,10 +9,27 @@
 #define RADIO_TAG    44            /* bytes of one line of text: the plaque's 40 characters and the NUL, in whole words */
 #define RADIO_RATE   44100         /* the game mixer's rate */
 #define RADIO_MAGIC  0x31444152u   /* "RAD1": a runtime with the radio writes it first in the block */
-#define RADIO_VERSION 3u           /* of the words below: a layout change raises it (2: skip; 3: the song playing, for Last.fm) */
+#define RADIO_VERSION 5u           /* 5: acknowledged folder seek; all version 4 offsets stay unchanged */
 #define RADIO_SONG_NONE   0u       /* song_kind: no song (between two, a race without music, the Radio's silence) */
 #define RADIO_SONG_GAME   1u       /* one of the game's EA Trax songs; song_text is its table entry */
 #define RADIO_SONG_FOLDER 2u       /* the Radio's track from the folder; song_text is the tags the page gave for it */
+
+#define RADIO_COMMANDS 8u
+#define RADIO_PCM 512u
+enum { RADIO_PREVIOUS = 1, RADIO_TOGGLE, RADIO_NEXT };
+typedef struct {
+    uint32_t enabled;              /* page: cockpit wants transport and spectrum */
+    uint32_t volume;               /* page: 0..65536, applied only after enabled */
+    uint32_t write, read;          /* page producer / mixer consumer, bounded command ring */
+    uint32_t commands[RADIO_COMMANDS];
+    uint32_t state;                /* runtime: bit 0 live, bit 1 paused, bit 2 owns pause */
+    uint32_t pcm_seq;              /* runtime: sequence lock of the latest music-only mono window */
+    uint32_t pcm_rate, pcm_frames;
+    float pcm[RADIO_PCM];
+    uint32_t seek_seq, seek_track, seek_frame; /* page: publish sequence last */
+    uint32_t seek_ack, seek_ready; /* mixer freezes both readers before ack; page refills before ready */
+} RadioCockpit;
+_Static_assert(sizeof(RadioCockpit) == 84 + 4 * RADIO_PCM, "cockpit radio layout");
 
 typedef struct {
     uint32_t radio_magic;          /* RADIO_MAGIC, written when the runtime starts; the page uses nothing below without it */
@@ -46,7 +63,8 @@ typedef struct {
     uint32_t song_end;             /* the song_seq of the song that played to its end */
     char offer_text[RADIO_PLACES][3][RADIO_TAG];   /* per place: artist, title, album, NUL-padded ASCII */
     char song_text[3][RADIO_TAG];  /* the song playing: artist, title, album, NUL-padded, as the game has them (Latin-1) */
+    RadioCockpit cockpit;          /* appended so version 3 text/ring offsets stay unchanged */
 } HostStatusRadio;
 
-_Static_assert(sizeof(HostStatusRadio) == 80 + (RADIO_PLACES + 1) * 3 * RADIO_TAG, "page layout (status.ts)");
+_Static_assert(sizeof(HostStatusRadio) == 80 + (RADIO_PLACES + 1) * 3 * RADIO_TAG + sizeof(RadioCockpit), "page layout (status.ts)");
 #endif

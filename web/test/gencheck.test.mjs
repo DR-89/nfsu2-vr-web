@@ -7,13 +7,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { execFileSync, spawnSync } from 'node:child_process';
+import {execBuild,spawnBuild} from '../tools/build-tools.mjs';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
-const sources = execFileSync('bash', [path.join(REPO, 'tools/genstamp.sh'), 'sources'], { encoding: 'utf8' }).trim();
-const orig = execFileSync('bash', [path.join(REPO, 'tools/genstamp.sh'), 'overrides'], { encoding: 'utf8' }).trim().split(',').filter(Boolean);
+const sources = execBuild('bash', [path.join(REPO, 'tools/genstamp.sh'), 'sources'], { encoding: 'utf8' }).trim();
+const orig = execBuild('bash', [path.join(REPO, 'tools/genstamp.sh'), 'overrides'], { encoding: 'utf8' }).trim().split(',').filter(Boolean);
 const STAMP = `# gen.sh 2026-10-18T00:00:00Z: what gen/all and gen/server were lifted from\n${sources}\nexe 0 server.dll 0\noptions X87PC=1 X87OPT=1 FLAGABI=0\n`;
 
 /** a fake gen dir: decls.h with the runtime's _orig declarations, and the given stamps */
@@ -26,7 +26,7 @@ function gen(name, { all = STAMP, server = all, decls = orig } = {}) {
   if (server !== null) fs.writeFileSync(path.join(g, 'server/stamp.txt'), server);
   return g;
 }
-const check = (g, env = {}) => spawnSync('bash', [path.join(REPO, 'web/tools/gencheck.sh')], { cwd: REPO, encoding: 'utf8', timeout: 120_000, env: { ...process.env, GEN: g, ...env } });
+const check = (g, env = {}) => spawnBuild('bash', [path.join(REPO, 'web/tools/gencheck.sh')], { cwd: REPO, encoding: 'utf8', timeout: 120_000, env: { ...process.env, GEN: g, ...env } });
 
 test('gencheck: a gen stamped from this checkout passes', () => {
   const r = check(gen('ok'));
@@ -77,7 +77,7 @@ test('a plain ./gen.sh drops web-lift.txt and leaves gen/all unstamped until it 
   fs.writeFileSync(path.join(t, 'gen/all/web-lift.txt'), 'FLAGABI X87OPT\n');
   fs.writeFileSync(path.join(t, 'gen/all/stamp.txt'), STAMP);
   fs.writeFileSync(path.join(t, 'SPEED2.EXE'), 'not a PE file');
-  const r = spawnSync('bash', [path.join(t, 'gen.sh'), path.join(t, 'SPEED2.EXE')], { cwd: t, encoding: 'utf8', timeout: 300_000 });
+  const r = spawnBuild('bash', [path.join(t, 'gen.sh'), path.join(t, 'SPEED2.EXE')], { cwd: t, encoding: 'utf8', timeout: 300_000 });
   assert.notEqual(r.status, 0, 'gen.sh failed (no lifter in the copy)');
   assert.match(r.stdout, /OVERRIDE \(\d+\)/, 'it got past its preamble');
   assert.ok(!fs.existsSync(path.join(t, 'gen/all/web-lift.txt')), 'web-lift.txt is gone');
@@ -90,9 +90,9 @@ test('web/gen.sh refuses to lift through a worktree\'s link to the shared gen', 
   fs.mkdirSync(path.join(t, 'web'), { recursive: true }); fs.mkdirSync(path.join(t, 'shared/all'), { recursive: true }); fs.mkdirSync(path.join(t, 'gen'));
   fs.copyFileSync(path.join(REPO, 'web/gen.sh'), path.join(t, 'web/gen.sh'));
   fs.writeFileSync(path.join(t, 'shared/all/web-lift.txt'), 'FLAGABI X87OPT\n');
-  fs.symlinkSync(path.join(t, 'shared/all'), path.join(t, 'gen/all'));
+  fs.symlinkSync(path.join(t, 'shared/all'), path.join(t, 'gen/all'), process.platform==='win32'?'junction':'dir');
   fs.writeFileSync(path.join(t, 'SPEED2.EXE'), 'x');
-  const r = spawnSync('bash', [path.join(t, 'web/gen.sh'), path.join(t, 'SPEED2.EXE')], { cwd: t, encoding: 'utf8', timeout: 300_000 });
+  const r = spawnBuild('bash', [path.join(t, 'web/gen.sh'), path.join(t, 'SPEED2.EXE')], { cwd: t, encoding: 'utf8', timeout: 300_000 });
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stdout, /gen\/all is a link to .*which other worktrees build against/);
   assert.ok(fs.existsSync(path.join(t, 'shared/all/web-lift.txt')), 'the shared gen is untouched');

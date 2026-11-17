@@ -15,6 +15,8 @@
 //                    gets a test certificate (web/test/cf-sim.mjs makeTestCerts, --tls-cert), whose
 //                    errors the pages ignore instead of trusting it
 //        [--page app]  each instance is the player's start page (web/index.html): Play is clicked, the
+//        [--vr-poses NAME] in that app instance, replace only headset tracking with moving test poses;
+//                    the game, authenticated socket, car mapping and GPU renderer remain real.
 //                    renderer, audio, input and network are the app's (free roam from the page address's
 //                    NFSU2_ROAM=1); the default is test/hostcheck.html (null renderer, net=<name>).  A page of
 //                    1600x900 (--size), and a script line `log SHOT <name>` saves the page as the player sees it
@@ -372,6 +374,18 @@ async function start(i, name, script, own) {
     await page.waitForFunction(() => window.__nfsu2?.phase === 'ready', null, { timeout: 120000 });
     await page.click('#play');
     w('[roam-pair] clicked Play');
+    if (opts('vr-poses').includes(name)) {
+      await page.waitForFunction(() => !!window.__nfsu2?.session?.mod, null, { timeout: 120000 });
+      await page.evaluate(() => {
+        const mod = window.__nfsu2.session.mod, tick = mod.tick.bind(mod);
+        mod.tick = (now, avatar, police, secondary) => tick(now, { car: avatar?.car??0, cockpit: avatar?.cockpit??0, vr: true,
+          head: { p: [Math.sin(now / 700) * .08, 0, 0], q: [0, 0, 0, 1] },
+          left: { p: [-.14, -.21, -.33], q: [0, 0, 0, 1] },
+          right: { p: [.18, -.1 + Math.sin(now / 500) * .1, -.3], q: [0, 0, 0, 1] },
+        }, police, secondary);
+      });
+      w('[roam-pair] synthetic VR head/hand tracking enabled');
+    }
   }
   // the page's view of the virtual LAN every 10 s
   const timer = setInterval(async () => {

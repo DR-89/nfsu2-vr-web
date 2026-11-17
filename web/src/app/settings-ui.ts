@@ -28,7 +28,14 @@ import { LANGUAGES, live, N, NATIVE, t, tn, tvars, type Language, type Msg, type
 import { SITE_KEYS } from './sitekeys';
 import { copyText, copyToast } from './copy';
 import { MODS } from './mods';
+import {MOD_CONTROLS,playerHeadlights,onlineCarLimit} from './mod-controls';
+import { mirrorModels,mirrorFields,mirrorKey } from '../vr/mirror-profiles';
+import {vrFields,vrLaunchFields} from '../vr/settings-fields';
 import { modName, modSections, rowHelp, rowName } from './mods-ui';
+import {StancePanel} from './stance-panel';
+import {editStance,stancePrefs} from '../vr/stance-settings';
+import type {DriverScene} from '../vr/drivers';
+import { lastVRPixels, keepVRPixels, vrPixelsText, type VRRenderPixels } from '../vr/resolution-info';
 
 type Control =
   | { t: 'switch' }
@@ -36,7 +43,7 @@ type Control =
   /** a choice of more than a row of buttons holds: a drop-down list; preview: a Listen button beside it plays the
    *  value chosen (the promise ends when it has played), stop ends that early */
   | { t: 'select'; opts: [value: string, label: string][]; preview?: { play(value: string): Promise<void>; stop(): void } }
-  | { t: 'num'; min?: number; max?: number; step?: number; unit?: string }
+  | { t: 'num'; range?: boolean; min?: number; max?: number; step?: number; unit?: string }
   | { t: 'text'; placeholder?: string }
   /** the worlds (worlds.ts): a drop-down list of the main world, World 1 to 4 and Own name, each with how many are in
    *  free roam there; Own name opens a box for the name, with a button in it that copies an invite link (invite.ts) */
@@ -74,20 +81,7 @@ const LANGUAGE_OPTS = LANGUAGES.map(l => [l, LANGUAGE_NAMES[l]] as [string, stri
 
 /** the controls of the mods' settings (mods.ts: a setting's entry), each on its mod's row in the Mods tab only (and
  *  nowhere else: web/test/mods.test.mjs) */
-export const MOD_CONTROLS: Record<string, Control> = {
-  ui_textures: { t: 'seg', opts: [['original', N('Original')], ['map', N('Map only')], ['uhud', N('Upscaled')]] },
-  subtitles: { t: 'switch' },
-  songs: { t: 'seg', opts: [['uncensored', N('Uncensored')], ['original', N('Original')]] },
-  gps_distance: { t: 'switch' },
-  show_hidden_races: { t: 'switch' },
-  visual_rep_remover: { t: 'switch' },
-  stance: { t: 'switch' },
-  crash_damage: { t: 'switch' },
-  catchup: { t: 'seg', opts: [['original', N('Original')], ['noboost', N('No boost')], ['off', N('Off')]] },
-  gearbox_whine: { t: 'switch' },
-  hq_vinyls: { t: 'switch' },
-  // mod_rims: { t: 'switch' },   (the rims: out for now, mods.ts)
-};
+export {MOD_CONTROLS} from './mod-controls';
 /** the Mods tab's one row that is no mod's: how other players' cars show the mods' looks (mods-ui.ts: first in "Seen by
  *  others") */
 const OTHERS_ITEM: Item = { key: 'others_mod_parts', label: N('Mods on other cars'),
@@ -98,6 +92,7 @@ const MOD_ITEMS: Item[] = MODS.flatMap(m => 'setting' in m.control && !m.row
   ? [{ key: m.control.setting, label: m.name, help: m.line, c: MOD_CONTROLS[m.control.setting] ?? { t: 'switch' }, mod: m.id }] : []);
 
 const GROUPS: Group[] = [
+  { title: N('VR'), more: '', at: 'vr-settings-body', items: [...vrLaunchFields,...vrFields] },
   { title: N('Online'), more: N('More online settings'), own: true, items: [
     { key: 'roam', label: N('Free roam with others'), help: N('See other players\' cars in career free roam, and they see yours.'), c: { t: 'switch' } },
     { key: 'roam_name', label: N('Your name'), help: N('Shown over your car and in the Online menu: 3 to 15 letters, digits, - or _.'), c: { t: 'text', placeholder: N('profile name') } },
@@ -113,8 +108,7 @@ const GROUPS: Group[] = [
     { key: 'roam_block', label: N('Blocked players'), help: N('Names, separated by commas: you never see each other in free roam. The server\'s operator sees who blocks whom.'), c: { t: 'text', placeholder: N('nobody') }, more: true },
     { key: 'roam_collide', label: N('Ghost mode'), help: N('Players: drive through other players\' cars. Everything: also through traffic and the game\'s tuners in free roam, but not a tuner you race in an outrun.'),
       c: { t: 'seg', opts: [['on', N('Off')], ['off', N('Players')], ['none', N('Everything')]] } },
-    { key: 'roam_max_cars', label: N('Players\' cars shown'), help: N('How many of the nearest players\' cars free roam shows. More can lower the frame rate.'), c: { t: 'seg', opts: [['16', '16'], ['24', '24'], ['32', '32'], ['48', '48'], ['64', '64']] },
-      deviceOpt: { value: 'auto', label: N('Auto'), help: N('How many of the nearest players\' cars free roam shows. More can lower the frame rate; Auto adds them only while it stays smooth.') } },
+    onlineCarLimit,
     { key: 'quick_chat', label: N('Quick chat'), help: N('Send phrases to players near you in free roam and to everyone in multiplayer races: 1 to 4, then 1 to 4 (controller: press a stick in, then flick the right stick twice; touch: the chat button).'), c: { t: 'switch' } },
     { key: 'quick_chat_phrases', label: N('Your phrases'), help: N('Four groups of four. Others read them in their own language.'), c: { t: 'phrases' } },
     { key: 'online', label: N('Online mode'), help: N('The game\'s Online menu skips the EA login: lobby, chat and races with everyone on this server.'), c: { t: 'switch' }, more: true },
@@ -142,6 +136,7 @@ const GROUPS: Group[] = [
     { key: 'movie_framing', label: N('Movie framing'), help: N('Fit keeps the 4:3 movies whole; fill crops them; stretch widens them.'), c: { t: 'seg', opts: [['fit', N('Fit')], ['fill', N('Fill')], ['stretch', N('Stretch')]] }, more: true },
     { key: 'cutscene_borders', label: N('Cutscene bars'), help: N('Letterbox bars across the whole width, or none.'), c: { t: 'seg', opts: [['full', N('Full')], ['off', N('Off')]] }, more: true },
     { key: 'fov_scale', label: N('3D proportions'), help: N('Corrected: true proportions and round wheels, a little more at the sides.'), c: { t: 'seg', opts: [['original', N('Original')], ['correct', N('Corrected')]] }, more: true },
+    playerHeadlights,
     { key: 'other_headlights', label: N('Other cars\' headlights'), help: N('Other cars light up the road like yours. Players: other players\' cars. All: AI racers and traffic too. Off: as in the original.'), c: { t: 'seg', opts: [['players', N('Players')], ['all', N('All cars')], ['off', N('Off')]] }, more: true },
     { key: 'fps_counter', label: N('Frame-rate counter'), help: N('Its key (Controls, Site) switches it while you play.'), c: { t: 'seg', opts: [['off', N('Off')], ['on', N('On')], ['detailed', N('Detailed')]] }, more: true },
     { key: 'resolution', label: N('Fixed render size'), help: N('Always render at this size, such as 2560x1440. Empty: the game\'s own setting.'), c: { t: 'text', placeholder: N('WxH') }, more: true },
@@ -180,8 +175,13 @@ const COMPANIONS = new Set([...Object.values(COMPANION), ...SITE_KEYS]);
 /** the rows that do nothing while free roam with others is off (each says so then) */
 const ROAM_ROWS = ['roam_room', 'roam_crew'];
 /** Every key the panel shows (the check in app-test.mjs compares this with the template). */
-export const PANEL_KEYS = [...GROUPS.flatMap(g => g.items.map(i => i.key)), ...COMPANIONS];
 const ITEMS = new Map(GROUPS.flatMap(g => g.items.map(i => [i.key, i] as const)));
+const MIRROR_BASE=new Map(mirrorFields.map(f=>[mirrorKey('DEFAULT',f),f]));
+const MIRROR_PARENT=new Map<string,string>();
+for(const model of mirrorModels.filter(m=>m!=='DEFAULT'))for(const field of mirrorFields){
+  const key=mirrorKey(model,field),base=mirrorKey('DEFAULT',field);ITEMS.set(key,{...ITEMS.get(base)!,key});MIRROR_PARENT.set(key,base);
+}
+export const PANEL_KEYS = [...ITEMS.keys(), ...COMPANIONS];
 const GROUP_OF = new Map(GROUPS.flatMap(g => g.items.map(i => [i.key, g] as const)));
 
 const boolOn = (v: string) => v === 'on';
@@ -393,6 +393,7 @@ function shown(it: Item, v: string): string {
 }
 
 export interface SettingsDeps {
+  scene?(): DriverScene|null;
   /** settings.ini (the panel reads and writes it there) */
   file: SettingsFile;
   /** the page address's environment (overrides the file) */
@@ -420,6 +421,20 @@ export interface SettingsDeps {
 }
 
 export class SettingsPanel {
+  private vrPixels = lastVRPixels();
+  private vrPixelsLive = false;
+  setVRResolution(pixels: VRRenderPixels | null): void {
+    if (pixels) { this.vrPixels = pixels; keepVRPixels(pixels); }
+    this.vrPixelsLive = !!pixels;
+    const note = this.find<HTMLElement>('#set-vr_render_scale-pixels');
+    if (note) note.textContent = this.vrPixelText();
+  }
+  private vrPixelText(): string {
+    const scale = Number(this.resolved.env.NFSU2_VR_RENDER_SCALE ?? this.current('vr_render_scale') ?? 100) / 100;
+    return vrPixelsText(this.vrPixels, this.vrPixelsLive, scale);
+  }
+  private stancePanel:StancePanel|null=null;
+  private stanceRoot:HTMLElement|null=null;
   private resolved!: Resolved;
   /** the file alone (no page address): what each row shows */
   private fileOnly!: Resolved;
@@ -476,6 +491,7 @@ export class SettingsPanel {
       if (d.kind === 'boolInv') return v === '' || v.startsWith('0') ? 'on' : 'off';
       return v;
     }
+    const parent=MIRROR_PARENT.get(key);if(parent)return this.current(parent);
     return this.deps.defaults?.[key] ?? DEFAULTS.get(key) ?? '';
   }
 
@@ -493,14 +509,16 @@ export class SettingsPanel {
 
   private async put(key: string, value: string | null, also: [string, string | null][] = []) {
     if (this.ro()) { this.deps.say?.(this.roText()); return; }
-    let next = this.text ?? TEMPLATE, removed = 0;
-    for (const [k, v] of [[key, value] as [string, string | null], ...also]) { const r = putKey(next, k, v); next = r.text; removed += r.removed; }
-    const was = await this.deps.file.write(next);
+    let removed = 0;const was=this.deps.file.forGame;
+    const next=await this.deps.file.edit(text=>{
+      for (const [k, v] of [[key, value] as [string, string | null], ...also]) { const r = putKey(text, k, v); text = r.text; removed += r.removed; }
+      return text;
+    });
     this.resolve(next);
     this.deps.onSaved?.(next, was);
     // (our controls' rows are the Site tab's, which draws them again itself: sitekeys.ts)
     const site = SITE_KEYS.includes(key);
-    if (removed) this.render(); else { if (!site) this.rerow(key); this.syncRaw(); }
+    if (removed || key==='vr_mirror_vehicle') this.render(); else { if (!site) this.rerow(key); this.syncRaw(); }
     // (the World and Crews rows say whether free roam is on; Ghost mode whether the world keeps it off)
     if (key === 'roam' && !removed) for (const k of ROAM_ROWS) this.rerow(k);
     if ((key === 'roam' || key === 'roam_room') && !removed) this.rerow('roam_collide');
@@ -508,6 +526,7 @@ export class SettingsPanel {
     const it = ITEMS.get(key), cur = this.current(key);
     if (!site && !this.deps.quietSave?.(key, value)) this.deps.say?.(() => {
       const v = { what: it ? labelOf(it) : key, value: it ? shown(it, cur) : value ?? '' };
+      if((key.startsWith('vr_')&&key!=='vr_cockpit')||key==='player_headlights'||key==='gps_distance'||key==='special_vinyls'||key==='gearbox_whine'||key==='stance')return `${t('Saved.')} ${v.what}: ${v.value}`;
       return value === null ? t('Saved: {what}, {value} (the default). Applies the next time you press Play.', v) : t('Saved: {what}, {value}. Applies the next time you press Play.', v);
     });
   }
@@ -525,6 +544,19 @@ export class SettingsPanel {
     const focusKey = (document.activeElement as HTMLElement | null)?.closest<HTMLElement>('.set')?.dataset.key;
     this.root.querySelector('#settings-body')!.replaceChildren(...GROUPS.filter(g => !g.own && !g.at).map(g => this.group(g)));
     for (const g of GROUPS.filter(g => g.at)) this.root.querySelector(`#${g.at}`)?.replaceChildren(...g.mods ? modSections(key => this.row(ITEMS.get(key)!)) : [this.group(g)]);
+    const stanceRow=this.root.querySelector('.set[data-key="stance"]');
+    if(stanceRow){
+      if(!this.stanceRoot){
+        this.stanceRoot=document.createElement('div');this.stanceRoot.id='stance-settings';
+        this.stancePanel=new StancePanel(this.stanceRoot,{read:()=>stancePrefs(this.fileOnly.env),readOnly:()=>this.ro(),scene:this.deps.scene,
+          save:async edit=>{
+            if(this.ro())throw new Error('settings are read-only');
+            const was=this.deps.file.forGame,next=await this.deps.file.edit(text=>editStance(text,edit).text);
+            this.resolve(next);this.deps.onSaved?.(next,was);this.syncRaw();this.root.dataset.saved=String(++this.saves);this.deps.say?.(t('Saved.'));
+          }});
+      }
+      stanceRow.after(this.stanceRoot);this.stancePanel?.render();
+    }
     this.root.querySelector('#settings-lines')!.replaceChildren(...this.others());
     this.online.querySelector('#online-body')!.replaceChildren(...GROUPS.filter(g => g.own && !g.at).map(g => this.group(g)));
     this.syncRaw();
@@ -558,7 +590,10 @@ export class SettingsPanel {
       box.setAttribute('role', 'group'); box.setAttribute('aria-labelledby', h.id);
       box.append(h);
     }
-    box.append(...g.items.filter(i => !i.more).flatMap(i => { const after = this.deps.rowAfter?.(i.key); return after ? [this.row(i), after] : [this.row(i)]; }));
+    box.append(...g.items.filter(i => !i.more).flatMap(original => {
+      const field=MIRROR_BASE.get(original.key),i=field?ITEMS.get(mirrorKey(this.current('vr_mirror_vehicle'),field))!:original;
+      const after = this.deps.rowAfter?.(i.key); return after ? [this.row(i), after] : [this.row(i)];
+    }));
     const more = g.items.filter(i => i.more);
     if (more.length) {
       const d = document.createElement('details'); d.className = 'more';
@@ -580,7 +615,7 @@ export class SettingsPanel {
   /** The lines with keys outside the table, and those of table keys the panel has no row for (roam_rate and the
    *  other tuning knobs, the Mac app's): listed, so nothing in the file acts unseen (the audit's PAGE-2). */
   private others(): HTMLElement[] {
-    const unshown = Object.entries(this.fileOnly.file).filter(([k, f]) => !ITEMS.has(k) && !COMPANIONS.has(k) && f.raw !== '')
+    const unshown = Object.entries(this.fileOnly.file).filter(([k, f]) => k!=='stance_models' && !ITEMS.has(k) && !COMPANIONS.has(k) && f.raw !== '')
       .map(([key, f]) => ({ phys: f.phys, key, env: key, value: f.raw, refused: f.refused, why: f.why }));
     const other = [...this.fileOnly.other, ...unshown].sort((a, b) => a.phys - b.phys);
     if (!other.length) return [];
@@ -719,6 +754,11 @@ export class SettingsPanel {
       }
       sel.onchange = () => void this.put(it.key, sel.value);
       ctl.append(sel);
+      if(it.key==='vr_mirror_vehicle'){
+        const reset=document.createElement('button');reset.type='button';reset.className='text-btn';reset.textContent=t('Reset mirrors');
+        reset.onclick=()=>{const keys=mirrorFields.map(f=>mirrorKey(sel.value,f));void this.put(keys[0],'0',keys.slice(1).map(k=>[k,'0'])).then(()=>this.render());};
+        ctl.append(reset);
+      }
       if (c.preview) {
         // plays what the list shows (also before it is saved); a second press stops it
         const pv = c.preview, b = document.createElement('button');
@@ -774,11 +814,15 @@ export class SettingsPanel {
         setInFile ? () => void this.put(it.key, null, [[comp!, null]]) : null, t(it.label));
     } else {
       const inp = document.createElement('input'); inp.id = id;
-      inp.type = c.t === 'num' ? 'number' : 'text';
+      inp.type = c.t === 'num' ? c.range ? 'range' : 'number' : 'text';
       if (c.t === 'num') { if (c.min !== undefined) inp.min = String(c.min); if (c.max !== undefined) inp.max = String(c.max); if (c.step !== undefined) inp.step = String(c.step); }
       else if (c.placeholder) inp.placeholder = t(c.placeholder);
       if (it.key === 'license_plate') plateInput(inp);
       inp.value = cur;
+      if (c.t === 'num' && c.range) {
+        const value = document.createElement('output'); value.htmlFor = id; value.value = cur;
+        inp.addEventListener('input', () => { value.value = inp.value; }); ctl.append(value);
+      }
       inp.onchange = () => {
         let v = inp.value.trim();
         // Your name in the form the Online menu and free roam both use (claim.ts); a plate in capitals (plates.ts)
@@ -802,12 +846,16 @@ export class SettingsPanel {
                                                                // leaves it; Your phrases has its own, beside Choose
                                                                // phrases; World's list has the main world)
       const r = iconButton('reset-btn', t('Reset {label}', { label: labelOf(it) }), RESET);
-      r.title = t('Back to the default ({value})', { value: shown(it, DEFAULTS.get(it.key) ?? '') });
+      r.title = t('Back to the default ({value})', { value: shown(it, MIRROR_PARENT.has(it.key)?this.current(MIRROR_PARENT.get(it.key)!):DEFAULTS.get(it.key) ?? '') });
       r.onclick = () => void this.put(it.key, null, comp ? [[comp, null]] : []);
       ctl.prepend(r);                                // first: the control keeps its place at the right edge
     }
     // a mod's row: its (i) right after its name (mods-ui.ts modName)
     row.append(it.mod ? modName(label, it.mod) : label, help, ctl);
+    if (it.key === 'vr_render_scale') {
+      const pixels = document.createElement('p'); pixels.className = 'set-state vr-pixels'; pixels.id = `${id}-pixels`;
+      pixels.setAttribute('aria-live', 'polite'); pixels.textContent = this.vrPixelText(); row.append(pixels);
+    }
     if (it.key === 'roam_name' && c.t === 'text') this.deps.nameRow?.(row, ctl.querySelector('input')!, ctl);
     const bad = ([[it.key, f], [comp, f2]] as const).filter(([, x]) => x?.refused)
       .map(([k, x]) => t('settings.ini line {line}: {key} = {why}, so the default is used.', { line: x!.phys, key: k!, why: x!.why ? tvars(x!.why.t, x!.why.v) : x!.refused! }));

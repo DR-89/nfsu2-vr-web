@@ -35,8 +35,8 @@ fn csp_and_policies() {
     assert_eq!(content_security_policy(&[], &[]), CSP);
     assert_eq!(
         CSP,
-        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; \
-         img-src 'self' data: blob:; style-src 'self'; font-src 'self'; media-src 'self'; object-src 'none'; \
+        "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' http://127.0.0.1:*; \
+         img-src 'self' data: blob:; style-src 'self'; font-src 'self'; media-src 'self' blob:; object-src 'none'; \
          base-uri 'none'; form-action 'self'; frame-src 'none'; frame-ancestors 'none'"
     );
     let with = content_security_policy(&["sha256-a", "sha256-b"], &["sha256-c"]);
@@ -45,7 +45,7 @@ fn csp_and_policies() {
     // crypto.createHash('sha256').update('x', 'utf8').digest('base64')
     assert_eq!(sha256_source("x"), "sha256-LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE=");
     assert!(permissions_policy().starts_with("gamepad=(self), fullscreen=(self), "));
-    assert!(permissions_policy().ends_with(", window-management=(), xr-spatial-tracking=()"));
+    assert!(permissions_policy().ends_with(", window-management=(), xr-spatial-tracking=(self)"));
     assert_eq!(permissions_policy().split(", ").count(), 27);
 }
 
@@ -68,6 +68,7 @@ fn security_headers_in_order() {
         ]
     );
     assert_eq!(h[1].1, "require-corp");
+    assert!(h[7].1.split(", ").any(|directive| directive == "xr-spatial-tracking=(self)"));
     assert_eq!(h[8].1, "noindex, nofollow");
     let h = security_headers(true, false);
     assert_eq!(h[8].1, "index, follow");

@@ -15,6 +15,12 @@ const FILE = 'settings.ini';
 export class SettingsFile {
   private shown: string | null = null;
   private played: string | null = null;
+  private pending: Promise<void> = Promise.resolve();
+  private queue<T>(job: () => Promise<T>): Promise<T> {
+    const next = this.pending.then(job);
+    this.pending = next.then(() => {}, () => {});
+    return next;
+  }
   /** dir: the save folder (it may change before the page reads it: a test page's address) */
   constructor(private readonly dir: () => string, private readonly log: (s: string) => void) {}
 
@@ -28,6 +34,7 @@ export class SettingsFile {
 
   /** read again, as the panel shows it; throws where it did not read */
   async read(): Promise<string | null> {
+    await this.pending;
     this.shown = await this.peek();
     return this.shown;
   }
@@ -51,7 +58,8 @@ export class SettingsFile {
 
   /** the whole file written: both views have it.  It gives what forGame was before (shell.ts: another language or pack
    *  counts other game data) */
-  async write(text: string): Promise<string | null> {
+  write(text: string): Promise<string | null> { return this.queue(() => this.writeNow(text)); }
+  private async writeNow(text: string): Promise<string | null> {
     await writeFile(this.dir(), FILE, text);
     const was = this.played;
     this.shown = this.played = text;
@@ -61,9 +69,11 @@ export class SettingsFile {
   /** the file changed by edit, on top of the file as it is now (the template where there is none): never on top of a
    *  view alone, which is null where the file did not read.  Throws where it did not read or write (nothing written
    *  then). */
-  async edit(edit: (text: string) => string): Promise<string> {
-    const text = edit(await this.peek() ?? TEMPLATE);
-    await this.write(text);
-    return text;
+  edit(edit: (text: string) => string): Promise<string> {
+    return this.queue(async () => {
+      const text = edit(await this.peek() ?? TEMPLATE);
+      await this.writeNow(text);
+      return text;
+    });
   }
 }

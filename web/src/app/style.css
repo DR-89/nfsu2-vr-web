@@ -145,6 +145,8 @@ button, .file-btn { cursor: pointer; }
 .play:hover:not(:disabled) { background: #4c5440; }
 .play:disabled { border-color: #4a4a4a; background: var(--field); color: var(--edge); box-shadow: none; cursor: not-allowed; }
 .play kbd { border-color: currentColor; background: none; color: inherit; }
+.play-vr { border-color: #87c9ff; color: #b6ddff; background: #162b3d; box-shadow: none; }
+.play-vr:hover:not(:disabled) { background: #203e56; }
 
 kbd {
   display: inline-block; min-width: 24px; padding: 1px 8px; border: 1px solid var(--edge); border-radius: 4px;
@@ -304,11 +306,11 @@ kbd .glyph { display: inline-block; width: 14px; height: 14px; vertical-align: -
 }
 .switch:disabled { cursor: not-allowed; opacity: 0.5; }
 
-.set input[type="number"], .set input[type="text"], .profiles input[type="text"], .dlg input[type="text"] {
+.set input[type="number"], .set input[type="text"], .set input[type="password"], .profiles input[type="text"], .dlg input[type="text"] {
   width: 128px; height: 40px; padding: 0 12px; border: 2px solid var(--edge); border-radius: 8px;
   background: var(--field); color: var(--lime); font: italic 700 16px/24px var(--font);
 }
-.set input[type="number"], .set input[type="text"] { width: 240px; }
+.set input[type="number"], .set input[type="text"], .set input[type="password"] { width: 240px; }
 .set input::placeholder { color: var(--edge); font-weight: 400; }
 /* the Room's value box (settings-ui.ts): its invite link button in it at the right, as the passphrase's eye is in its
  * .keybox; the box is the frame, the field inside it has none */
@@ -1466,7 +1468,7 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.64); }
   .set-control > .seg { display: flex; flex: 1; flex-wrap: wrap; }   /* choices that do not fit on one line take two */
   .set-control > .reset-btn { order: 1; }           /* Reset after the control here, where the control is aligned left */
   /* a value box fills the row, beside what stays at its own width (Listen) */
-  .set-control > select, .set-control > input[type="text"], .set-control > input[type="number"], .set-control > .linkbox,
+  .set-control > select, .set-control > input[type="text"], .set-control > input[type="password"], .set-control > input[type="number"], .set-control > .linkbox,
   .set-control .crew-add { flex: 1 1 160px; width: auto; min-width: 0; max-width: none; }
   .set-control .fl-add { flex: none; width: 100%; }
   .set-world .set-control { align-items: stretch; }
@@ -1486,6 +1488,8 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.64); }
   .stat { padding-inline: 8px; }                   /* room for 7,592 in a third of the smallest phones */
   .tabs { gap: 16px; }
   html:not([data-touch]) .tabs { gap: 8px; }
+  .tabs:not(.big) { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .tabs:not(.big) > .tab { min-width: 0; height: auto; min-height: 40px; hyphens: auto; overflow-wrap: anywhere; }
 }
 /* a phone on its side (a short window): the page menu's two blocks side by side, so all of it is in sight */
 @media (max-height: 479px) {
@@ -1513,3 +1517,44 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.64); }
 .fmbot:hover .fmbot-go { color: #fff; }
 /* /lastfm.html, the Last.fm popup's page, when the browser keeps the window open (lastfm-callback.ts) */
 .lastfm-closed { margin: 24px; }
+
+/* The game stays playable on the monitor before and after an immersive session. */
+.vr-controls { position: absolute; right: 16px; bottom: 16px; z-index: 20; display: flex; align-items: center; gap: 8px; max-width: calc(100% - 32px); }
+.vr-controls button { height: 40px; border-radius: 8px; padding: 0 16px; }
+.vr-controls span { max-width: 320px; padding: 8px; border-radius: 8px; color: white; background: #171b22e8; font-size: 12px; }
+.vr-controls span:empty { display: none; }
+
+/* Profile-backed VR settings and local media on the start page. */
+#vr-settings-body input[type=range] { width: min(240px, 48vw); accent-color: var(--lime, #c2ef27); }
+#vr-settings-body output { min-width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+.vr-media { margin-top: 24px; border-top: 1px solid var(--line, #343842); padding-top: 16px; }
+.vr-media video { display: block; width: 100%; max-height: 400px; margin-top: 16px; border-radius: 8px; background: #080a0f; }
+.vr-media video[hidden] { display: none; }
+.vr-media select { min-width: 0; flex: 1; max-width: 100%; height: 40px; }
+.vr-music-choice { display: flex; gap: 8px; align-items: center; min-height: 40px; }
+.vr-media .row { flex-wrap: wrap; gap: 8px; }
+
+.vr-controls[hidden] { display: none; }
+.haptics-setup { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 16px; }
+.haptics-setup summary { cursor: pointer; min-height: 40px; display: list-item; padding: 8px 0; }
+.haptics-setup p, .haptics-setup ol { margin: 8px 0; }
+.haptics-setup ol { padding-left: 24px; }
+.haptics-setup li + li { margin-top: 8px; }
+.haptics-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
+.haptics-actions .btn { min-height: 40px; }
+
+.race-open { position: absolute; top: 16px; right: 16px; z-index: 20; }
+.race-open[hidden] { display: none; }
+.race-dlg { width: min(720px, calc(100vw - 32px)); }
+.race-dlg .hint { margin: 8px 0; }
+.race-rows { display: grid; gap: 8px; margin: 16px 0; }
+.race-row > .btn { width: 100%; text-align: left; white-space: normal; overflow-wrap: anywhere; height: auto; min-height: 40px; }
+.race-adjust { display: grid; grid-template-columns: minmax(96px, 1fr) 40px minmax(80px, 2fr) 40px; gap: 8px; align-items: center; }
+.race-adjust output { text-align: center; overflow-wrap: anywhere; min-width: 0; }
+.race-adjust > .btn { height: 40px; padding: 0; text-align: center; }
+.race-dlg form { display: grid; gap: 16px; }
+.race-dlg form input { display: block; width: 100%; height: 40px; margin-top: 8px; }
+@media (max-width: 480px) {
+  .race-adjust { grid-template-columns: 40px minmax(80px, 1fr) 40px; }
+  .race-adjust > span { grid-column: 1 / -1; }
+}

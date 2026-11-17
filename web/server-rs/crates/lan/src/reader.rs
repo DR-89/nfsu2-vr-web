@@ -198,6 +198,10 @@ impl LanSwitch {
             }
             return;
         }
+        if data.first() == Some(&34) {
+            self.vr_message(peer, &data);
+            return;
+        }
         if n < 12 {
             return;
         }

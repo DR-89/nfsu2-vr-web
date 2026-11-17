@@ -358,6 +358,9 @@ pub struct Player {
     pub name: String,
     pub addr: String,
     pub vip: u32,
+    /// Only this admitted connection may use the race roster for avatar access.
+    /// Race results outlive connections, so an address reused later is not a grant.
+    pub avatar_connected: bool,
     pub flags: u32,
     pub back: bool,
     pub reported: bool,
@@ -778,6 +781,40 @@ impl Lobby {
     /// a browser left the switch
     pub fn peer_gone(&mut self, vip: u32, now: f64) {
         self.gone_vips.insert(vip, now);
+        for game in self.games.values_mut() {
+            for p in &mut game.players {
+                if p.vip == vip {
+                    p.avatar_connected = false;
+                }
+            }
+        }
+    }
+
+    pub fn avatar_links(&self, here: &HashSet<u32>, vips: &[u32]) -> nfsu2_util::host::AvatarLinks {
+        let wanted: HashSet<_> = vips.iter().copied().filter(|v| here.contains(v)).collect();
+        let mut out = nfsu2_util::host::AvatarLinks::default();
+        out.managed.extend(self.by_persona.values().filter_map(|s| self.sess.get(s)).map(|s| s.vip).filter(|v| wanted.contains(v)));
+        for g in self.games.values() {
+            let active: Vec<_> = g
+                .players
+                .iter()
+                .filter(|p| p.avatar_connected && !p.back && wanted.contains(&p.vip))
+                .filter(|p| g.started == 0.0 || self.by_persona.get(&lower(&p.name)).is_none_or(|s| p.s == Some(*s)))
+                .filter(|p| g.started != 0.0 || p.s.is_some_and(|s| self.sessions.contains(&s)))
+                .map(|p| p.vip)
+                .collect();
+            out.managed.extend(&active);
+            for (i, &a) in active.iter().enumerate() {
+                for &b in &active[i + 1..] {
+                    if a != b {
+                        out.pairs.extend([(a, b), (b, a)]);
+                    }
+                }
+            }
+        }
+        out.pairs.sort_unstable();
+        out.pairs.dedup();
+        out
     }
 
     fn later_mut(&mut self, k: LaterKey) -> Option<&mut Later> {
@@ -2559,6 +2596,7 @@ impl Core {
             name: x.persona.clone().unwrap_or_default(),
             addr: x.addr.clone(),
             vip: x.vip,
+            avatar_connected: true,
             flags: 0,
             back: false,
             reported: false,

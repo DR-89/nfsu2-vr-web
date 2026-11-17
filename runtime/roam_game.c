@@ -518,6 +518,9 @@ typedef struct {
     int64_t  acq_us;                          /* the slot was given to this friend then (host time): for the logs */
 } Slot;
 static Slot g_sl[NSLOT];
+#ifdef __wasm__
+#include "web/vr_web.h"
+#endif
 /* Co-op free roam online (coop.c): player 2 is a second endpoint of this browser, a session of its own (roam_web.c
  * roam_plat_start2) on player 1's port + 1, from the moment player 2 joins (coop_wanted) until it leaves or the game
  * ends: its car's state and look from its car (car_state, car_cfg), its status player 1's (one world: paused,
@@ -546,6 +549,45 @@ static struct {
     int      tell;                            /* the page is to hear of the endpoint (c2_tell: 1 its name, 2 its end) */
     uint32_t teleports, joins, leaves, hits;  /* statistics (hits: player 2's car's with friends', shared: roam_game_contact) */
 } g_c2;
+#ifdef __wasm__
+/* Both local players have a separate endpoint on the same browser connection.
+ * Keep the local second car visible offline too; only live endpoints get IDs. */
+uint32_t roam_game_vr_local(VrCar *primary, VrCar *secondary){
+    uint32_t car = coop_p2_car();
+    int valid = car && vr_web_car(car,secondary);
+    if (!valid) memset(secondary,0,sizeof *secondary);
+    roam_plat_lock();
+    primary->peer_id = g_net_ok ? g_s.conf.self_id : 0;
+    secondary->peer_id = valid && g_c2.on && g_c2.car == car ? g_c2.id : 0;
+    roam_plat_unlock();
+    return valid ? 1u : 0u;
+}
+/* Visibility is the existing roam slot's, identity its authenticated virtual
+ * IP and exact endpoint. A friend can belong to either local player's session. */
+uint32_t roam_game_vr_cars(VrCar *out, uint32_t capacity){
+    uint32_t n = 0, w = world();
+    if (!w) return 0;
+    roam_plat_lock();
+    for (int k = 0; k < NSLOT && n < capacity; k++){
+        const Slot *s = &g_sl[k];
+        if (s->st != SL_ACTIVE || s->hidden || s->world != w || s->peer < 0 || s->peer >= 2*RC_TABLE || !ok(s->car, 0x110)) continue;
+        const rc_peer *p = s->peer < RC_TABLE ? &g_s.peer[s->peer] : g_c2.on ? &g_c2.s.peer[s->peer-RC_TABLE] : 0;
+        if (!p || p->state != RC_PS_EST || p->id != s->peer_id) continue;
+        VrCar *v = &out[n++]; memset(v, 0, sizeof *v);
+        v->vip = p->ip; v->peer_id = p->id; v->steer = s->steer;
+        for (int i = 0; i < 3; i++){
+            v->transform[i] = MRF32(s->car + 0x90u + 4u*i);
+            v->transform[4+i] = MRF32(s->car + 0xa0u + 4u*i);
+            v->transform[8+i] = MRF32(s->car + 0xb0u + 4u*i);
+            v->transform[12+i] = MRF32(s->car + 0x50u + 4u*i);
+        }
+        v->transform[15] = 1;
+        memcpy(v->model, s->carname, sizeof v->model - 1);
+    }
+    roam_plat_unlock();
+    return n;
+}
+#endif
 #if COOP
 static uint32_t g_cp_n, g_cp_said, g_cp_nm;  /* co-op: contacts let through (c2_pair), cars named in the log; near misses let go */
 static int c2_solid_to(uint32_t me, const Slot *s);
@@ -827,6 +869,34 @@ static uint32_t find_part(CPU *c, uint32_t type, uint32_t sl, uint32_t key, uint
  * runtime/modpacks.c modpacks_for_others).
  * Returns the number of parts not found, or -1. */
 uint32_t modpacks_for_others(uint32_t key);          /* modpacks.c: a mod part's stand-in (others_mod_parts = original) */
+#ifdef __wasm__
+/* A different retail region may name a valid type whose model files are
+ * absent here. The original loader never completes that read and holds up
+ * all later rides. Check the local type's files before giving it a slot;
+ * the manifest is fixed for this game process, so cache once per type. */
+static int peer_car_files(CPU *c, const uint8_t *cfg, int len){
+    static uint8_t known[46];
+    rc_carcfg cc;
+    if (rc_carcfg_decode(cfg, len, &cc) != RC_OK) return 0;
+    uint32_t types = rd32(G_CARTYPES), ti = gcall1(c, FN_TYPE_BY_HASH, 0, cc.type_hash);
+    if (!types || ti < types || (ti - types) % 0x890u) return 1; /* build_ride owns unknown/add-on types */
+    uint32_t type = (ti - types) / 0x890u;
+    if (type >= 46) return 1;
+    if (known[type]) return known[type] == 1;
+    char name[20], path[96]; cstr(ti, name, sizeof name);
+    if (!name[0]) return 0;
+    for (const char *p = name; *p; p++) if (!((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || *p == '_')) return 0;
+    const char *files[] = { "GEOMETRY.BIN", "TEXTURES.BIN" };
+    known[type] = 1;
+    for (unsigned i = 0; i < sizeof files / sizeof files[0]; i++){
+        snprintf(path, sizeof path, "/data/CARS/%s/%s", name, files[i]);
+        FILE *f = fopen(path, "rb");
+        if (!f){ known[type] = 2; rlog("[roam] %s: local car data missing; this type is not loaded\n", name); return 0; }
+        fclose(f);
+    }
+    return 1;
+}
+#endif
 /* set while a friend's look is loaded (begin_load): the car loader's texture list for it (overrides.c
  * sub_00631e20) names its engine's texture too, for an open hood (showoff.c) */
 int roam_texlist_engine;
@@ -8889,6 +8959,9 @@ static void assign(CPU *c, int64_t host){
         }
         if (best < 0) return;
         PeerView *v = &g_pv[best];
+#ifdef __wasm__
+        if (!peer_car_files(c, v->cfg, v->cfg_len)){ tried[best] = 1; continue; }
+#endif
         int k = -1, reuse = 0;
         /* 1. a parked car already wearing this look: no load at all */
         for (int j = 0; j < nslots && k < 0; j++)
@@ -9189,6 +9262,20 @@ static void name_follow(void){
  * outruns): a friend's outrun on the HUD to challenge or to take, a multiplayer-only race spot (an open race's
  * marker is the game's), a lobby to join, our lobby to start */
 static int g_engage;
+/* The page waits for the original game's name before reconnecting with another
+ * claim. Hashing the applied ASCII name keeps credentials out of shared status. */
+uint32_t roam_game_name_hash(void){
+    const char *name = O.name;
+#ifndef ROAM_HOST_WIN
+    /* Online login reads the page's name directly even with free roam off.
+     * In that mode no free-roam frame consumes name_follow's generation. */
+    char picked[33],cleaned[33];
+    if (!O.on && roam_plat_name(picked)){ rc_name_clean(cleaned,picked,sizeof cleaned); name=cleaned; }
+#endif
+    uint32_t hash = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)name; *p; p++) hash = (hash ^ *p) * 16777619u;
+    return hash;
+}
 static int engage_ours(void){
     if (DUELS && g_du.icon) return 1;
 #if MPRACES
@@ -9256,6 +9343,36 @@ static void c2_links_set(void){
     rc_set_links(&g_c2.s, k);
     g_c2.links = k;
 }
+/* The main-thread VR/website mailbox queues the last choice. Neither a race
+ * nor a lobby may lose a participant car because its display cap changed.
+ * More cars use the existing demand-grown Cars pool (roam_game_purge); no
+ * active guest allocation or loader block is resized here. */
+static int g_car_limit_pending = -2;
+void roam_game_set_car_limit(int limit){
+    if (limit >= -1 && limit <= MAX_CARS) g_car_limit_pending = limit;
+}
+static void car_limit_follow(CPU *c){
+    if (g_car_limit_pending < -1 || !roaming() || g_racing || du_on() || g_photo_hold) return;
+#if MPRACES
+    if (g_mp.st != MP_IDLE) return;
+#endif
+    int automatic = g_car_limit_pending == -1;
+    int cars = automatic ? DEF_CARS : g_car_limit_pending;
+    g_car_limit_pending = -2;
+    if (O.cars_auto == automatic && (automatic || O.max_cars == cars)) return;
+    int before = O.max_cars;
+    O.cars_auto = automatic; O.max_cars = cars;
+    int64_t window = g_auto.window_us; int test_late = g_auto.test_late;
+    memset(&g_auto, 0, sizeof g_auto);
+    g_auto.window_us = window; g_auto.test_late = test_late; g_auto.top = DEF_CARS;
+#ifdef __wasm__
+    g_auto.top = g_gwin_hi ? MAX_CARS : AUTO_TOP_NOWIN;
+#endif
+    for (int k = cars; k < NSLOT; k++) release(c, k, "fewer cars shown");
+    roam_plat_lock(); c2_links_set(); roam_plat_unlock();
+    rlog("[roam] f=%ld players' cars shown (live): %d -> %d%s\n", rh_frame(), before, cars, automatic ? " (Auto)" : "");
+}
+
 #if COOP
 /* player 2's name: player 1's in its Online form (A-Z a-z 0-9 _ -, any other run of characters one _, as online.c
  * clean(), the page's onlineName and the server's claims have it) cut to 13 characters, then " 2": "Thom 2", whose
@@ -9793,6 +9910,9 @@ void roam_game_frame(CPU *c){
             PeerView *v = 0;
             for (int i = 0; i < g_npv; i++) if (g_pv[i].idx == s->peer && g_pv[i].id == s->peer_id) v = &g_pv[i];
             if (!v) continue;
+#ifdef __wasm__
+            if (v->cfg_len > 0 && !peer_car_files(c, v->cfg, v->cfg_len)){ release(c, k, "local car data missing"); continue; }
+#endif
             s->seats = v->seats;
             if (strcmp(s->flagcode, v->flag)){ memcpy(s->flagcode, v->flag, sizeof s->flagcode); s->flag = flag_find(s->flagcode); }
             /* the friend's first plate at once, then a new one at most every PLATE_EVERY_US: one who changes it again
@@ -9911,6 +10031,7 @@ void roam_game_frame(CPU *c){
     mp_frame(c, host, in_roam, world_runs, mpfrom, mpin, nmpin);
     mp_panel(host, in_roam);
 #endif
+    car_limit_follow(c);
     g_engage = in_roam && world_runs && engage_ours();
     sounds_update(have_ls ? &ls : 0, world_runs);
     showoff_peers(c);

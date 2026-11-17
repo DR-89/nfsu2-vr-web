@@ -7,10 +7,11 @@ const WORDS = ['radio_magic', 'radio_version', 'on', 'tag_seq', 'places', 'req_s
 type Word = typeof WORDS[number];
 export const RADIO_WORDS: readonly string[] = WORDS;
 /** What the runtime writes into the first two words at its start (RADIO_MAGIC, RADIO_VERSION in radio_proto.h). */
-export const RADIO_MAGIC = 0x31444152, RADIO_VERSION = 3;
+export const RADIO_MAGIC = 0x31444152, RADIO_VERSION = 5;
 const W = Object.fromEntries(WORDS.map((n, i) => [n, i])) as Record<Word, number>;
 const CTL = 16 + 48 * 24,   // the status table before them (status.ts: HEAD + MAX * ITEM)
   PLACES = 2, TAG = 44, TEXT = WORDS.length * 4;
+const COCKPIT = TEXT + (PLACES + 1) * 3 * TAG, PCM = 512, COMMANDS = 8;
 
 export interface Lines { artist: string; title: string; album: string }
 /** The song playing as the runtime tells it (radio_proto.h song_*): seq counts the songs the game started; kind: 'game' an EA Trax
@@ -33,7 +34,8 @@ export class RadioLink {
     const end = ptr + CTL + TEXT + (PLACES + 1) * 3 * TAG;
     if (!Number.isInteger(ptr) || ptr < 0 || end > memory.buffer.byteLength || (ptr + CTL) % 4) return null;
     const w = new Int32Array(memory.buffer, ptr + CTL, 2);
-    return Atomics.load(w, W.radio_magic) === RADIO_MAGIC && Atomics.load(w, W.radio_version) === RADIO_VERSION ? new RadioLink(memory, ptr) : null;
+    const version=Atomics.load(w,W.radio_version);
+    return Atomics.load(w, W.radio_magic) === RADIO_MAGIC && (version === 3 || (version===4||version===5)&&end+64+PCM*4+(version===5?20:0)<=memory.buffer.byteLength) ? new RadioLink(memory, ptr) : null;
   }
   private words() { return new Int32Array(this.memory.buffer, this.ptr + CTL, WORDS.length); }
 
@@ -79,7 +81,53 @@ export class RadioLink {
   skip() { Atomics.add(this.words(), W.skip, 1); }
 
   /** The page wants the song playing told (song()), radio on or off: Last.fm's scrobbles (lastfm.ts). */
-  listen(on: boolean) { Atomics.store(this.words(), W.listen, on ? 1 : 0); }
+  listen(on: boolean, consumer:'scrobble'|'cockpit'='scrobble') {
+    const bit=consumer==='cockpit'?2:1;
+    if(on)Atomics.or(this.words(),W.listen,bit);else Atomics.and(this.words(),W.listen,~bit);
+  }
+
+  private controls():Int32Array|null {
+    const version=Atomics.load(this.words(),W.radio_version);
+    if((version!==4&&version!==5)||this.ptr+CTL+COCKPIT+64+PCM*4>this.memory.buffer.byteLength)return null;
+    return new Int32Array(this.memory.buffer,this.ptr+CTL+COCKPIT,16);
+  }
+  cockpit(active:boolean,volume:number):void {
+    this.listen(active,'cockpit');
+    const w=this.controls();if(!w)return;
+    if(Number.isFinite(volume))Atomics.store(w,1,Math.round(Math.min(1,Math.max(0,volume))*65536));
+    Atomics.store(w,0,active?1:0);
+  }
+  command(action:'previous'|'toggle'|'next'):boolean {
+    const w=this.controls();if(!w||!Atomics.load(w,0))return false;
+    const write=Atomics.load(w,2)>>>0,read=Atomics.load(w,3)>>>0;
+    if((write-read>>>0)>=COMMANDS)return false;
+    Atomics.store(w,4+(write&(COMMANDS-1)),action==='previous'?1:action==='toggle'?2:3);
+    Atomics.store(w,2,write+1);return true;
+  }
+  transport():{live:boolean;paused:boolean}|null {
+    const w=this.controls();if(!w)return null;
+    const state=Atomics.load(w,12);return {live:!!(state&1),paused:!!(state&2)};
+  }
+  private seekWords():Int32Array|null {
+    return Atomics.load(this.words(),W.radio_version)===5?new Int32Array(this.memory.buffer,this.ptr+CTL+COCKPIT+64+PCM*4,5):null;
+  }
+  get seekable():boolean{return this.seekWords()!==null;}
+  get position():number{return Atomics.load(this.words(),W.read)>>>0;}
+  requestSeek(track:number,frame:number):number {
+    const s=this.seekWords();if(!s||this.request().seq!==track)return 0;
+    const seq=((Atomics.load(s,0)+1)>>>0)||1;
+    Atomics.store(s,1,track);Atomics.store(s,2,frame);Atomics.store(s,0,seq);return seq;
+  }
+  seekAcknowledged(seq:number):boolean {const s=this.seekWords();return !!s&&(Atomics.load(s,3)>>>0)===seq;}
+  beginSeek(frame:number):void {Atomics.store(this.words(),W.written,frame);}
+  finishSeek(seq:number):void {const s=this.seekWords();if(s)Atomics.store(s,4,seq);}
+  musicSamples(after=-1):{seq:number;rate:number;samples:Float32Array}|null {
+    const w=this.controls();if(!w)return null;
+    const seq=Atomics.load(w,13)>>>0,n=Atomics.load(w,15),rate=Atomics.load(w,14);
+    if(!seq||seq===after||(seq&1)||n<1||n>PCM||rate<11025||rate>48000)return null;
+    const samples=new Float32Array(this.memory.buffer,this.ptr+CTL+COCKPIT+64,n).slice();
+    return (Atomics.load(w,13)>>>0)===seq&&samples.every(Number.isFinite)?{seq,rate,samples}:null;
+  }
 
   /** The song playing, null while the runtime writes it (asked again a moment later) or before it told one. */
   song(): Song | null {

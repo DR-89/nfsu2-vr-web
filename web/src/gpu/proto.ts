@@ -4,7 +4,11 @@
 // the renderer refuses a control block whose layout word differs.
 
 export const GW_MAGIC = 0x55504757;
-export const GW_VERSION = 7;
+export const GW_VERSION = 8;
+export const VR_HUD = 1;
+export const VR_PERSPECTIVE = 2;
+export const VR_VIEW_SHIFT = 4;
+export const VR_DRIVER_SHIFT = 8;
 export const GW_NBUF = 2;
 // GwHL: the other cars' headlights at this byte offset of every frame's VS constant arena (group 0 binding 3)
 export const K_HL = 256, HL_BYTES = 656, HL_MAX = 8;
@@ -30,14 +34,14 @@ export const CAP_NONE = 0, CAP_TILES = 1, CAP_SHUTTER = 2, LENS_PLAIN = 0, LENS_
 // the VS constant arena is bound in windows of this many 16-byte rows (GW_KWIN_ROWS)
 export const KWIN_ROWS = 4096;
 
-// GwDraw: 180 bytes, all 32-bit fields (word index = byte offset / 4).  A blit's first and count: its source
+// GwDraw: 184 bytes, all 32-bit fields (word index = byte offset / 4).  A blit's first and count: its source
 // rectangle, left | top << 16 and right | bottom << 16 (count 0 = the whole source)
-export const DRAW_BYTES = 180, DRAW_WORDS = 45;
+export const DRAW_BYTES = 184, DRAW_WORDS = 46;
 export const enum D {
   first = 0, count = 1, tex = 2, target = 3, kind = 4, blend = 5, aref = 6, depth = 7,
   tex1 = 8, tex2 = 9, tex3 = 10, ps = 11, psci = 12, vsid = 13, rawoff = 14, koff = 15,
   proj = 16, smp = 20, blitSrc = 24, bcol = 25, cull = 26, fogv = 27, clrArgb = 31, clrFlags = 32,
-  clrZ = 33, ksz = 34, ixIsz = 35, ixIb = 36, ixBase = 37, clip = 38, viewport = 39,
+  clrZ = 33, ksz = 34, ixIsz = 35, ixIb = 36, ixBase = 37, clip = 38, viewport = 39, vrFlags = 45,
 }
 export const enum Kind { Draw = 0, Clear = 1, Blit = 2 }
 
@@ -68,6 +72,7 @@ export const FEAT_BC = 1, FEAT_SWIZZLE = 2, FEAT_HQSKIN = 4;
 export const ATTACHED = 1, DETACHED = 2;
 
 // GwVsync: tick i32 @0, seq i32 @4, ts_ms f64 @8, period_ms f64 @16, hz i32 @24, visible i32 @28
+// visible: 0 hidden, 1 visible document, 2 immersive XR (same mailbox layout).
 export const enum V { tick = 0, seq = 1, tsF64 = 1, periodF64 = 2, hz = 6, visible = 7 }
 
 // resource queue

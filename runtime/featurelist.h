@@ -35,6 +35,7 @@ void tonemenu_install(void);
 void powerunits_install(void);
 
 /* ---- instruction hooks: 1 when the address is the hook's ------------------- */
+int raceactions_hook(CPU *c, uint32_t ip);
 int splitscreen_hook(CPU *c, uint32_t ip);
 int coop_hook(CPU *c, uint32_t ip);
 int ws_hook(CPU *c, uint32_t ip);
@@ -86,4 +87,5 @@ void savegame_frame(void);
 void coop_frame(CPU *c);
 void engage_frame(CPU *c);
 void roam_frame(CPU *c);
+void raceentry_frame(CPU *c, double now);
 #endif

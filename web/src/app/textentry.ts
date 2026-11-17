@@ -16,6 +16,13 @@ import { t } from './i18n';
 /** the punctuation the game's kinds 0 and 3 take besides letters and digits (0x7FA3D0) */
 const PUNCT = ' .,_@-`=[]\\;\'/<>?:"{}|+()*&%#!~';
 
+/** 0x540AB0 substitutes '*' only for kind 5; other kinds show their text. */
+export function secret(kind:number):boolean{return kind===5;}
+/** 0x551270 ignores Enter before any WM_CHAR. NUL advances that guard without
+ * changing the text, so a prefilled field accepts once, with no second Enter
+ * leaking into the next dialog. */
+export const ACCEPT_TEXT=[0,13] as const;
+
 /** whether the game's text entry of this kind takes the character (0x4FF310) */
 export function takes(kind: number, ch: string): boolean {
   const c = ch.length === 1 ? cp1252(ch.charCodeAt(0)) : -1;
@@ -93,6 +100,7 @@ export class TextField {
 
   private update() {
     this.entry = this.session?.input?.textEntry?.() ?? null;
+    if(this.entry)this.field.type=secret(this.entry.kind)?'password':'text';
     const show = !!this.entry && this.seen && !this.away;
     if (show && !this.shown) this.open();
     else if (!show && this.shown) this.close();
@@ -116,6 +124,7 @@ export class TextField {
   private take() {
     const e = this.entry;
     if (!e) return;
+    this.field.type=secret(e.kind)?'password':'text';
     this.sent = e.text;
     if (this.field.value !== e.text) this.field.value = e.text;
     this.field.maxLength = e.max;
@@ -133,6 +142,6 @@ export class TextField {
 
   private accept() {
     this.onInput();
-    this.session?.input?.text?.([13]);
+    this.session?.input?.text?.([...ACCEPT_TEXT]);
   }
 }

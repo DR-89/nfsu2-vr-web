@@ -68,12 +68,14 @@
 // switch are reliable and ordered).  A TCP connect to this browser while it has
 // no LAN endpoint is answered with a reset (refused), as a host without a
 // listener would.
+import { encodeMod, decodeMod, MOD_KIND, type ModRequest, type ModEvent } from '../vr/protocol';
 import type { GameProcess } from '../host/process';
 import { HostKind } from '../host/abi';
 import * as P from './proto';
 import { N } from '../app/i18n';
 
 export interface NetOptions {
+  onMod?(event: ModEvent): void;
   /** the name other players see on the switch's peer list */
   name?: string;
   /** this browser's own id (app/page-id.ts), in the hello: the operator's bans name a page by it; and the one its
@@ -136,6 +138,9 @@ export interface NetOptions {
   waitMs?: number;
 }
 export interface NetPeer { vip: string; name: string; self: boolean }
+/** A deliberate connection-profile change. Claims are opaque tokens, never
+ * keyphrases; the caller separately updates the original game's name/room. */
+export interface NetProfile { name:string; claim?:string }
 /** which ban, as the switch names it (a server from before says none of it): its number, the player's name when it
  *  was made, and when that was (ms since 1970) */
 export interface NetBanCase { id?: number; name?: string; at?: number }
@@ -194,6 +199,7 @@ export interface NetStats {
     refuseHeld: number; peersGone: number };
 }
 export interface NetLink {
+  profile(profile:NetProfile|null):Promise<boolean>;
   readonly state: NetState;
   readonly vip: string | null;
   readonly peers: NetPeer[];
@@ -215,6 +221,7 @@ export interface NetLink {
   /** free roam's friends: a message to the server ({"t":"friend",...m}, or m's own "t": "room"); false: the link is
    *  not up now */
   friend(m: Record<string, unknown>): boolean;
+  mod(m: ModRequest): boolean;
   /** free roam's crews, changed while the game runs (the page menu): their hashes (players.ts roomHash), in the
    *  player's order, at most 4, and their colours (0x00rrggbb; 0 or none: the place's default) */
   setCrews(hashes: readonly number[], rgbs?: readonly number[]): void;
@@ -492,6 +499,8 @@ export class Link implements NetLink {
   /** the player chose to stop waiting and play offline (goOffline), or the operator removed them: nothing takes the
    *  switch again this game */
   private stayOff = false;
+  private profileOff = false;
+  private activityAway = false;
   /** the switch's kick or ban message, until its close comes */
   private removal: NetRemoved | null = null;
   /** the race ban this player is under now (onRaces), and the name taken away the switch named before its close */
@@ -701,11 +710,13 @@ export class Link implements NetLink {
     if (this.closed || !this.offForName) return;
     this.o.name = name;
     this.stayOff = false; this.offForName = false; this.removal = null; this.renaming = null;
-    if (this.state === 'away') this.state = 'idle';
+    if (this.state === 'away' && !this.profileOff && !this.activityAway) this.state = 'idle';
     this.log('back to the switch under another name');
     this.checkWant();
   }
   setAway(on: boolean) {
+    this.activityAway=on;
+    on=on||this.profileOff;
     if (this.closed || this.stayOff || on === (this.state === 'away')) return;
     if (on) {
       this.release('away');
@@ -715,6 +726,18 @@ export class Link implements NetLink {
       this.log('the player is here again');
       this.checkWant();
     }
+  }
+  /** Profile disconnect is reversible, independently of idle/away detection.
+   * An operator removal, forced rename or an open LAN/Online game must first
+   * finish its existing flow; this entry point cannot clear those restrictions. */
+  async profile(profile:NetProfile|null):Promise<boolean>{
+    if(this.closed||this.lanOpen()||this.stayOff||this.removal||this.renaming)return false;
+    if(profile && (!/^[A-Za-z0-9_-]{3,15}$/.test(profile.name)||profile.name.includes('\n')||
+      profile.claim!==undefined && (profile.claim.length!==43||/[^A-Za-z0-9_-]/.test(profile.claim))))return false;
+    this.release('away');this.profileOff=profile===null;
+    if(profile){this.o.name=profile.name;this.o.claim=profile.claim;if(!this.activityAway){this.state='idle';this.checkWant();}}
+    this.log(profile?'connection profile selected':'connection profile disconnected');
+    return true;
   }
   setSolid(collide: 'on' | 'off' | 'none') {
     this.solid = collide === 'on' ? 2 : collide === 'none' ? 3 : 1;
@@ -730,6 +753,12 @@ export class Link implements NetLink {
     this.picks = (this.picks + 1) & 0xffffff;
     Atomics.store(ep.i32, P.W_SAY, (this.picks << 8 | (p & 0xff)) | 0);
     return true;
+  }
+  mod(m: ModRequest): boolean {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN || this.state !== 'online') return false;
+    if (ws.bufferedAmount > 65536) return false;
+    ws.send(encodeMod(m)); return true;
   }
   friend(m: Record<string, unknown>): boolean {
     const ws = this.ws;
@@ -1145,6 +1174,7 @@ export class Link implements NetLink {
   private rx(b: ArrayBuffer) {
     const c0 = performance.now();
     const u = new Uint8Array(b);
+    if (u[0] === MOD_KIND) { const event = decodeMod(u); if (event) this.o.onMod?.(event); return; }
     if (u.length >= 4 && u[0] === P.NET_KIND_COMPACT) {
       if (u[1] & P.NET_BUNDLE_STAMPED && u.length >= 12) {
         this.stamp = { p: u.slice(4, 12), at: c0 };

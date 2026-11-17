@@ -2886,6 +2886,42 @@ impl Hub {
         v
     }
 
+    /// Visit only endpoints of browsers sharing avatars, not every player in
+    /// the world. Live links already enforce world, block and discovery rules.
+    pub fn avatar_links(&self, vips: &[u32]) -> nfsu2_util::host::AvatarLinks {
+        let wanted: HashSet<_> = vips.iter().copied().collect();
+        let mut out = nfsu2_util::host::AvatarLinks::default();
+        let now = (self.now)();
+        for &vip in &wanted {
+            for &slot in self.per_vip.get(&vip).into_iter().flatten() {
+                let Some(p) = self.player(slot).filter(|p| matches!(p.status, 2 | 5)) else { continue };
+                out.managed.insert(vip);
+                if p.impostor || p.p.is_none() || now - p.pos_at > self.o.stale_ms {
+                    continue;
+                }
+                for other in p.links.iter().filter(|l| self.live(l) && l.dir & DIR_SEND != 0).filter_map(|l| self.player(l.slot)) {
+                    if other.vip != vip
+                        && wanted.contains(&other.vip)
+                        && matches!(other.status, 2 | 5)
+                        && p.room == other.room
+                        && !other.impostor
+                        && other.p.is_some()
+                        && now - other.pos_at <= self.o.stale_ms
+                        && !blocked(&self.blocks, p, other)
+                    {
+                        out.pairs.push((vip, other.vip));
+                        out.cars.push((vip, other.vip, p.id));
+                    }
+                }
+            }
+        }
+        out.pairs.sort_unstable();
+        out.pairs.dedup();
+        out.cars.sort_unstable();
+        out.cars.dedup();
+        out
+    }
+
     /// each player's links now, by `vip:port`, for the tests
     pub fn links(&self) -> Vec<(String, Vec<String>)> {
         let name = |p: &Player| format!("{}:{}", p.vip, p.port);

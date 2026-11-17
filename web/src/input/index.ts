@@ -37,7 +37,7 @@
 import type { GameProcess } from '../host/process';
 import { HostKind } from '../host/abi';
 import { CODES, cp1252, isMeta, keyChars, keyVk, PAGE_CODES } from './keymap';
-import { PadPoller, type PadPage, type TouchPad } from './gamepad';
+import { PadPoller, type PadPage, type TouchPad, type SpatialPad, type SpatialFeedback } from './gamepad';
 import { SynthDriver } from './synth';
 import { AltGrCtrl } from './altgr';
 import {
@@ -79,7 +79,7 @@ export interface InputStats {
 export interface InputCounters { [k: string]: number; 'input events': number; 'keys held': number; 'pad connected': number }
 /** the game's text entry (runtime/web/input_web.c): the most characters it takes, its kind (which characters
  *  besides letters and digits), its text now */
-export interface TextEntry { max: number; kind: number; text: string }
+export interface TextEntry { max: number; kind: number; text: string; length?:number }
 export interface InputHandle {
   /** WM_CLOSE to the game.  Before the game's mailbox exists (the first ~0.2 s
    *  after the start) the request waits and is sent when it registers.  false:
@@ -111,6 +111,9 @@ export interface InputHandle {
   exitFullscreen(): Promise<void>;
   toggleFullscreen(): Promise<void>;
   releaseAll(): void;
+  /** XR owns focus while its session exists: true visible, false covered or
+   * hidden, null returns ownership to the normal browser window. */
+  immersiveFocus(visible: boolean | null): void;
   /** everything, for test pages and logs */
   status(): InputStats;
   /** numbers only, for the app's detailed overlay */
@@ -123,6 +126,8 @@ export interface InputHandle {
   key(code: string, down: boolean): void;
   /** the touch controls' virtual controller, merged with a real one (null: none) */
   touchPad(t: TouchPad | null): void;
+  spatialPad(p: SpatialPad | null): void;
+  vrFeedback(p:SpatialFeedback|null):void;
   /** the touch controls' level horizon: the phone's tilt the game's 3D view turns against, radians, + = clockwise */
   viewRoll(rad: number): void;
   /** the menus' small buttons' size, 1 = the game's own (touch.ts: the Menu button size): the scroller arrows', and
@@ -169,6 +174,7 @@ export function attachInput(proc: GameProcess, element: HTMLElement, opts: Input
   let h: Int32Array | null = null, u8: Uint8Array | null = null, i32: Int32Array | null = null, base = 0;
   let layout: Map<string, string> | null = null;
   let active: boolean | null = null;
+  let xrFocus: boolean | null = null;
   let pads: PadPoller | null = null, synth: SynthDriver | null = null;
   let raf = 0, timer = 0, detached = false;
   const f32 = new Float32Array(1), f32Bits = new Int32Array(f32.buffer);   // a float's bits for a mailbox word
@@ -388,13 +394,14 @@ export function attachInput(proc: GameProcess, element: HTMLElement, opts: Input
   const onContextMenu = (e: Event) => e.preventDefault();
 
   // ---- lifecycle -------------------------------------------------------------------
-  const onBlur = () => setActive(false, IREASON_WINDOW);
-  const onFocus = () => { if (!document.hidden) setActive(true, IREASON_WINDOW); };
+  const onBlur = () => setActive(xrFocus ?? false, IREASON_WINDOW);
+  const onFocus = () => { if (xrFocus !== null || !document.hidden) setActive(xrFocus ?? true, IREASON_WINDOW); };
   const onVisibility = () => {
-    if (document.hidden) setActive(false, IREASON_VISIBILITY);
+    if (xrFocus !== null) setActive(xrFocus, IREASON_VISIBILITY);
+    else if (document.hidden) setActive(false, IREASON_VISIBILITY);
     else if (document.hasFocus()) setActive(true, IREASON_VISIBILITY);
   };
-  const onPageHide = () => push(IEV_RELEASE_ALL, 0, 0, 0, [], 0, IREASON_PAGEHIDE);
+  const onPageHide = () => { setActive(false, IREASON_PAGEHIDE); push(IEV_RELEASE_ALL, 0, 0, 0, [], 0, IREASON_PAGEHIDE); };
   const onElementBlur = () => push(IEV_RELEASE_ALL, 0, 0, 0, [], 0, IREASON_ELEMENT);
   const onFullscreen = () => {
     if (document.fullscreenElement) return;
@@ -505,6 +512,11 @@ export function attachInput(proc: GameProcess, element: HTMLElement, opts: Input
     async exitFullscreen() { keyboardApi()?.unlock?.(); if (document.fullscreenElement) await document.exitFullscreen(); },
     async toggleFullscreen() { if (document.fullscreenElement) await api.exitFullscreen(); else await api.enterFullscreen(); },
     releaseAll() { push(IEV_RELEASE_ALL, 0, 0, 0, [], 0, IREASON_PAGE); },
+    immersiveFocus(visible) {
+      if (detached) return;
+      xrFocus = visible;
+      setActive(visible ?? (!document.hidden && document.hasFocus()), IREASON_VISIBILITY);
+    },
     probeLatency(n = 20) {
       const res: number[] = [];
       for (let i = 0; i < n && h; i++) {
@@ -530,6 +542,8 @@ export function attachInput(proc: GameProcess, element: HTMLElement, opts: Input
       if (k && !detached) push(down ? IEV_KEY_DOWN : IEV_KEY_UP, k.dik, k.vk, 0, down ? PAGE_KEY_CHARS[code] ?? [] : []);
     },
     touchPad(t) { pads?.setTouch(t); },
+    spatialPad(p) { pads?.setSpatial(p); },
+    vrFeedback(p) {pads?.setFeedback(p);},
     viewRoll(rad) { if (h && !detached) { f32[0] = rad; Atomics.store(h, IM_VIEW_ROLL, f32Bits[0]); } },
     menuScale(s, bar) { menu = bar ? s : -s; putMenu(); },
     padPressed() { return pads?.lastPress ?? 0; },
@@ -539,10 +553,11 @@ export function attachInput(proc: GameProcess, element: HTMLElement, opts: Input
         const s0 = Atomics.load(h, IM_TEXT_SEQ);
         if (s0 & 1) continue;
         const max = Atomics.load(h, IM_TEXT_MAX), kind = Atomics.load(h, IM_TEXT_KIND);
-        const len = Math.min(Atomics.load(h, IM_TEXT_LEN), INPUT_TEXT_BYTES), o = base + IM_TEXT * 4;
+        const length=Math.min(max,Math.max(0,Atomics.load(h,IM_TEXT_LEN)));
+        const len = Math.min(length, INPUT_TEXT_BYTES), o = base + IM_TEXT * 4;
         const bytes = u8.slice(o, o + len);
         if (Atomics.load(h, IM_TEXT_SEQ) !== s0) continue;
-        textNow = max > 0 ? { max, kind, text: win1252.decode(bytes) } : null;
+        textNow = max > 0 ? { max, kind, text: win1252.decode(bytes),length } : null;
         break;
       }
       return textNow;
@@ -625,7 +640,8 @@ export function attachInput(proc: GameProcess, element: HTMLElement, opts: Input
     // the game starts active (CreateWindowEx posts the activation): tell it
     // if the page is not
     active = true;
-    if (document.hidden) setActive(false, IREASON_VISIBILITY);
+    if (xrFocus !== null) setActive(xrFocus, IREASON_VISIBILITY);
+    else if (document.hidden) setActive(false, IREASON_VISIBILITY);
     else if (!document.hasFocus()) setActive(false, IREASON_WINDOW);
     raf = requestAnimationFrame(frame);
     timer = setInterval(tick, 4) as unknown as number;

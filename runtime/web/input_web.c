@@ -483,6 +483,7 @@ static void lifecycle_poll(void){
  * player's keys, mouse and pad are not passed on meanwhile (releases and
  * focus still are: nothing stays held) */
 int mprace_owns_input(void);
+int raceentry_owns_input(void);
 void sms_request(int id);
 void photo_input(int cmd, int a, int b);                 /* photo.c */
 void travel_ask(int k);                                  /* travel.c */
@@ -492,7 +493,7 @@ void roam_plat_name2_piece(int off, int total, const char *b, int n);   /* ...pl
 void roam_plat_lobby_input(int act, uint32_t host, uint32_t lobby, uint32_t race);   /* roam_web.c */
 static int g_muted;
 static void handle(const InEv *e){
-    int mute = mprace_owns_input();
+    int mute = mprace_owns_input() || raceentry_owns_input();
     if (mute != g_muted){
         g_muted = mute;
         if (mute) release_all("a multiplayer race's trip drives the game", 1, IREASON_NONE);
@@ -1144,7 +1145,7 @@ int gamepad_read(PadState *s){
      * while a keyboard player still owns a split-screen seat. */
     void split_keyboard_device(PadState *);
     split_keyboard_device(s);
-    if (!syn && mprace_owns_input()){ int con = s->connected, wh = s->wheel; memset(s, 0, sizeof *s); s->connected = con; s->wheel = wh; }   /* (handle above) */
+    if (!syn && (mprace_owns_input() || raceentry_owns_input())){ int con = s->connected, wh = s->wheel; memset(s, 0, sizeof *s); s->connected = con; s->wheel = wh; }   /* (handle above) */
     /* a wheel's position is the steering, with no dead zone around the middle (its pedals keep the triggers') */
     if (!s->wheel) stick_dz(&s->axis[PAD_AXIS_LX], &s->axis[PAD_AXIS_LY], dz);
     stick_dz(&s->axis[PAD_AXIS_RX], &s->axis[PAD_AXIS_RY], dz);
@@ -1160,6 +1161,10 @@ int gamepad_rumble_ok(void){
     return atomic_load_explicit(&MH(IM_PAD_RUMBLE), memory_order_relaxed) == 1u;
 }
 void gamepad_rumble(float strong, float weak){
+#ifdef __wasm__
+    void vr_web_rumble(float,float);
+    vr_web_rumble(strong,weak);
+#endif
     uint32_t s = (uint32_t)(strong <= 0.f ? 0.f : strong >= 1.f ? 65535.f : strong * 65535.f + 0.5f);
     uint32_t w = (uint32_t)(weak <= 0.f ? 0.f : weak >= 1.f ? 65535.f : weak * 65535.f + 0.5f);
     atomic_store_explicit(&MH(IM_RUMBLE_STRONG), s, memory_order_relaxed);

@@ -1,3 +1,7 @@
+import { startVRRaceProbe } from './vr-race-probe.mjs';
+import { startRaceActionsProbe } from './race-actions-probe.mjs';
+import { startRaceUIProbe } from './race-ui-probe.mjs';
+import { startRaceBrowserProbe } from './race-browser-probe.mjs';
 // LAN play between browsers: two (to six) game instances in headless Chrome
 // pages (separate browser contexts, so separate OPFS) on one local server,
 // racing each other over the server's virtual LAN -- the browser version of
@@ -30,6 +34,14 @@
 //                    and the play page's /game.wasm): a game of another version in the same race
 //        --mode drift|streetx: drift and Street X games (the mode carousel's 4th and 5th entries, as the
 //                    "mode" dumps of the runs show: Circuit, Sprint, Drag, Drift, Street X)
+//
+// --vr-check with --page app also requires race-car-mapped head/hand poses;
+// only player 2's XR tracking is synthetic. Saves a vr-race.png per player.
+// --race-browser-ui drives the host website and guest headset menu (simulated
+// tracking), including their masked password editors, through the same flow.
+// --race-browser-ui-reject also exercises an original wrong-password dialog.
+// --race-browser-actions keeps retail LAN login/car selection, then uses
+// the page command slot for all room actions and returns after the race.
 //
 // Without --base it starts its own server (web/tools/server-cmd.mjs, the game
 // folder from --data or NFSU2_DATA) and stops it by its child handle at the end.
@@ -70,6 +82,9 @@ const STAGGER = +opt('stagger', 3) * 1000;
 const BOUNCE = argv.includes('--bounce') ? +opt('bounce', 0) * 1000 : 0;
 const DROP = opt('drop', '') ? opt('drop', '').split(':').map(Number) : null;   // [instance (1-based), seconds]
 const PAGE = opt('page', 'hostcheck'), SIZE = opt('size', '960x540').split('x').map(Number), PLAY_ONLY = +opt('play-only', 0);
+const RACE_UI=argv.includes('--race-browser-ui');
+const RACE_ACTIONS=argv.includes('--race-browser-actions')||RACE_UI;
+if(RACE_ACTIONS&&(PAGE!=='app'||PLAYERS!==2||RACES!==1||DROP||BOUNCE))throw Error('--race-browser-actions requires --page app, two players, one race and no drop/bounce');
 const WASM_OF = new Map(opts('wasm-of').map(kv => [+kv.slice(0, kv.indexOf('=')), path.resolve(kv.slice(kv.indexOf('=') + 1))]));
 const PY = fs.existsSync(path.join(REPO, '.venv/bin/python')) ? path.join(REPO, '.venv/bin/python') : 'python3';
 fs.mkdirSync(OUT, { recursive: true });
@@ -90,6 +105,14 @@ const gen = (role, name, car, extra) => execFileSync(PY, [path.join(REPO, 'tools
   '--races', String(RACES), ...extra], { encoding: 'utf8' });
 const scripts = [gen('host', NAMES[0], 0, [...MODES[MODE].h, ...opts('host-arg')])];
 for (let i = 1; i < PLAYERS; i++) scripts.push(gen('join', NAMES[i], i, [...MODES[MODE].j, ...opts('join-arg'), ...opts(`join${i + 1}-arg`)]));
+if(RACE_ACTIONS)for(let i=0;i<scripts.length;i++){
+  const lines=scripts[i].split(/\r?\n/),begin=lines.findIndex(s=>/log lobby$/.test(s)),end=lines.findIndex(s=>/waitmem 0x008654a4 6 /.test(s));
+  if(begin<0||end<=begin)throw Error('generated LAN script has no lobby/race boundary');
+  lines.splice(begin+1,end-begin-1,'+0    log race-browser-actions','+0    waitfng PC_OL_GameRoom.fng 9000');
+  const quit=lines.findIndex(s=>/quit$/.test(s));if(quit<0)throw Error('generated LAN script has no exit');
+  lines.splice(quit,0,'+300  tap RETURN','+0    waitfng PC_OL_Lobby.fng 1800','+3000ms log race-browser-return');
+  scripts[i]=lines.join('\n');
+}
 fs.writeFileSync(path.join(OUT, 'host.txt'), scripts[0]);
 fs.writeFileSync(path.join(OUT, 'join.txt'), scripts[1]);
 
@@ -188,10 +211,13 @@ async function start(i) {
     await page.click('#play');
     w('[lan-pair] clicked Play');
   }
+  const vrProof = PAGE === 'app' && argv.includes('--vr-check') ? await startVRRaceProbe(page,i,path.join(dir,'vr-race.png')) : null;
+  const actionProof=RACE_UI?await startRaceUIProbe(page,i,{circuit:0,sprint:1,drag:2,drift:3,streetx:10}[MODE],dir,NAMES[0],argv.includes('--race-browser-ui-reject')):RACE_ACTIONS?await startRaceActionsProbe(page,i,{circuit:0,sprint:1,drag:2,drift:3,streetx:10}[MODE],NAMES[0]):null;
+  const raceProof=RACE_ACTIONS?await startRaceBrowserProbe(page):null;
   const timer = setInterval(async () => {
     try { const s = await page.evaluate(() => { const n = globalThis.nfsu2Net; return n ? { ...n.stats(), peers: n.peers } : null; }); if (s) w(`NETSTAT ${JSON.stringify(s)}`); } catch {}
   }, 10000);
-  Object.assign(r, { i, name: NAMES[i], dir, page, ctx, plog, lines, clk, timer, exitCode: () => exit, done: null });
+  Object.assign(r, { i, name: NAMES[i], dir, page, ctx, plog, lines, clk, timer, vrProof, actionProof, raceProof, exitCode: () => exit, done: null });
   r.done = page.waitForFunction(() => document.title === 'DONE' || window.__nfsu2?.phase === 'exited', null, { timeout: TMO, polling: 1000 })
     .then(() => 'done', () => 'timeout');
   inst.push(r);
@@ -212,7 +238,20 @@ for (let i = 1; i < PLAYERS; i++) { await new Promise(r => setTimeout(r, STAGGER
 const res = await Promise.all(inst.map(x => x.done));
 console.log(`lan-pair: ${inst.map((x, k) => `${x.name} ${res[k]}`).join(', ')} after ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 for (const x of inst) {
+  if(x.actionProof){
+    const proof=await x.actionProof().catch(()=>null);
+    fs.writeFileSync(path.join(x.dir,'race-actions.json'),JSON.stringify(proof,null,2));
+    if(!proof?.racing||!proof.returned||proof.errors.length||!proof.actions.length||proof.actions.some(a=>a.result!=='accepted')||
+      !(x.i===0?proof.left:proof.readyOff&&proof.readyOn)||
+      (RACE_UI&&x.i===0&&!proof.mobile)||(RACE_UI&&x.i===1&&argv.includes('--race-browser-ui-reject')&&!proof.rejectedPassword))x.lines.push('RACE_ACTION_PROOF_MISSING');
+  }
+  if(x.raceProof){
+    const proof=await x.raceProof().catch(()=>null);
+    fs.writeFileSync(path.join(x.dir,'race-browser.json'),JSON.stringify(proof,null,2));
+    if(!proof?.catalogMatches||!proof.room||proof.roster<PLAYERS||!proof.racingClear||proof.errors.length)x.lines.push('RACE_BROWSER_PROOF_MISSING');
+  }
   clearInterval(x.timer);
+  if(x.vrProof){const proof=await x.vrProof().catch(()=>null);x.lines.push('[vr-proof] '+JSON.stringify(proof));if(!proof?.samples || proof.gpuErrors!==0 || (proof.vr && (!proof.wheel || !proof.shifter || !proof.pedals || proof.fingerPoses.length<3)))x.lines.push('VR_PROOF_MISSING');}
   if (res[x.i] === 'timeout') x.lines.push(`TIME LIMIT REACHED: lan-pair stopped the run after ${(TMO / 1000).toFixed(0)} s`);
   fs.writeFileSync(path.join(x.dir, 'log.txt'), x.lines.join('\n') + '\n');
   fs.writeFileSync(path.join(x.dir, 'clock.csv'), 'arrived_ms,trace_s\n' + x.clk.map(s => s + '\n').join(''));
@@ -237,6 +276,7 @@ const summary = { mode: MODE, races: RACES, players: PLAYERS, result: {}, why: [
 for (const x of inst) {
   const log = fs.readFileSync(path.join(x.dir, 'log.txt'), 'utf8'), has = (re) => re.test(log), n = `i${x.i + 1}`;
   const why = [];
+  if(log.includes('VR_PROOF_MISSING'))why.push(`${n}:no-race-avatars`);
   if (x.dropped) {                                     // --drop: only that it ran into the race and failed cleanly
     if (has(/FAULT IN GUEST|GUEST MEMORY FAULT|HOST SEGV/)) why.push(`${n}:fault`);
     summary.result[x.name] = { dropped: `closed its page at ${x.dropped.toFixed(1)} s`, why };
@@ -246,6 +286,7 @@ for (const x of inst) {
   if (res[x.i] !== 'done') why.push(`${n}:timeout`);
   if (x.exitCode() !== 0) why.push(`${n}:exit=${x.exitCode()}`);
   if (!log.includes('quit at guest frame')) why.push(`${n}:no-quit`);
+  if(log.includes('RACE_ACTION_PROOF_MISSING')||log.includes('RACE_BROWSER_PROOF_MISSING'))why.push(`${n}:race-browser`);
   if (!log.includes('screen UI_PostRaceResults.fng')) why.push(`${n}:no-results`);
   if (has(/FAULT IN GUEST|GUEST MEMORY FAULT|HOST SEGV/)) why.push(`${n}:fault`);
   if (log.includes('TIME LIMIT REACHED')) why.push(`${n}:timeout`);

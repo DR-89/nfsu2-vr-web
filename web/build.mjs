@@ -112,16 +112,16 @@ function changelog(md) {
   md.split(/\r?\n/).forEach((line, i) => {
     const bad = what => { throw new Error(`CHANGELOG.md:${i + 1}: ${what}: ${line}`); };
     let m;
-    if ((m = /^## (\d{4}-\d{2}-\d{2}) \(([0-9a-f]{7,40})\)$/.exec(line))) {
+    if ((m = /^## (\d{4}-\d{2}-\d{2})(?: \(([0-9a-f]{7,40})\))?$/.exec(line))) {
       if (out.some(r => r.date === m[1])) bad("a day's releases share one section");
-      out.push({ date: m[1], commit: m[2], changes: [], fixes: [] });
+      out.push({ date: m[1], commit: m[2] ?? '', changes: [], fixes: [] });
       list = out.at(-1).changes;
     }
     else if (line === '### Fixes') {
       if (list !== out.at(-1)?.changes) bad('a release has one "### Fixes", after its new things');
       list = out.at(-1).fixes;
     }
-    else if (line.startsWith('#') && i > 0) bad('a release is "## <yyyy-mm-dd> (<commit>)", its fixes under "### Fixes"');
+    else if (line.startsWith('#') && i > 0) bad('a release is "## <yyyy-mm-dd>" with an optional commit, its fixes under "### Fixes"');
     else if ((m = /^- (?:\*\*([^*]+):\*\* )?(\S.*)$/.exec(line))) (list ?? bad('a change before the first release')).push([m[1] ?? '', m[2]]);
     else if (/^\s+\S/.test(line) && list?.length) list.at(-1)[1] += ' ' + line.trim();
     else if (/^\s*[-*+]/.test(line)) bad('a change is "- **Area:** what changed"');

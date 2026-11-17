@@ -15,11 +15,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {findWasi,execBuild} from '../tools/build-tools.mjs';
 import * as esbuild from 'esbuild';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const WASI = fs.readdirSync(path.join(REPO, 'deps')).filter(d => d.startsWith('wasi-sdk-')).map(d => path.join(REPO, 'deps', d)).pop();
-const CC = WASI && path.join(WASI, 'bin/clang');
+const WASI = findWasi(REPO);
+const CC = WASI && `${WASI}/bin/clang`;
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
 // web/build.sh's target, features and defines
 const FLAGS = ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-msimd128', '-mbulk-memory', '-mnontrapping-fptoint',
@@ -54,7 +55,7 @@ function pageRecord(m, dik, mods, caps) {
 
 test('ns* keys: the C driver (input_web.c) writes what the page would', { skip: !CC && 'no wasi-sdk in deps/' }, async () => {
   const w = path.join(OUT, 'input_unit.wasm');
-  execFileSync(CC, [...FLAGS, '-o', w, 'web/test/input_unit.c', 'runtime/web/thread_exit.c', ...LINK],
+  execBuild(CC, [...FLAGS, '-o', w, 'web/test/input_unit.c', 'runtime/web/thread_exit.c', ...LINK],
     { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const out = execFileSync(process.execPath, [path.join(REPO, 'web/test/wasi-run.mjs'), w], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 120_000 });
   const c = new Map();

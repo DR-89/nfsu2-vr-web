@@ -107,8 +107,10 @@ pub struct OnlineOptions {
 enum Event {
     Frame(u32, Bytes, FrameCtx),
     PeerGone(u32),
+    PeerResumed(u32),
     Info(oneshot::Sender<serde_json::Value>),
     Vips(oneshot::Sender<HashSet<u32>>),
+    AvatarLinks(Vec<u32>, oneshot::Sender<nfsu2_util::host::AvatarLinks>),
     Attach(SwitchSend),
     Friends(Arc<str>, Arc<str>, FriendAsk, oneshot::Sender<FriendReply>),
     PageMail(PageMailHook),
@@ -178,11 +180,15 @@ fn run(o: OnlineOptions, rx: mpsc::Receiver<Event>) {
             None => {}
             Some(Event::Frame(from, data, ctx)) => guarded(&mut core, Some((from, &data)), |c| c.frame(from, &data, &ctx)),
             Some(Event::PeerGone(vip)) => guarded(&mut core, None, |c| c.peer_gone(vip)),
+            Some(Event::PeerResumed(vip)) => guarded(&mut core, None, |c| c.peer_resumed(vip)),
             Some(Event::Info(tx)) => {
                 let _ = tx.send(core.info());
             }
             Some(Event::Vips(tx)) => {
                 let _ = tx.send(core.vips());
+            }
+            Some(Event::AvatarLinks(vips, tx)) => {
+                let _ = tx.send(core.avatar_links(&vips));
             }
             Some(Event::Attach(send)) => core.attach(send),
             Some(Event::Friends(owner, group, ask, tx)) => {
@@ -232,6 +238,9 @@ impl Host for OnlineHost {
     fn peer_gone(&self, vip: u32) {
         let _ = self.tx.send(Event::PeerGone(vip));
     }
+    fn peer_resumed(&self, vip: u32) {
+        let _ = self.tx.send(Event::PeerResumed(vip));
+    }
     /// the virtual host's counts and the lobby's (`personas`, `racing`, ...; core.rs `Core::info`)
     fn info(&self) -> oneshot::Receiver<serde_json::Value> {
         let (tx, rx) = oneshot::channel();
@@ -241,6 +250,11 @@ impl Host for OnlineHost {
     fn vips(&self) -> oneshot::Receiver<HashSet<u32>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.tx.send(Event::Vips(tx));
+        rx
+    }
+    fn avatar_links(&self, vips: Vec<u32>) -> oneshot::Receiver<nfsu2_util::host::AvatarLinks> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(Event::AvatarLinks(vips, tx));
         rx
     }
     /// the server stops: the lobby's links go, stats.json, buddies.json and races.json are written, the timers end.

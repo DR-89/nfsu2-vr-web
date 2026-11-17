@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include "../runtime/gpsdistance.c"
 uint8_t *g_mem;
+uint8_t g_cbits[1u << 15];
 static unsigned gps_state, clones, writes;
 static uint32_t objects[2];
 static int visible[2];
@@ -63,6 +64,7 @@ int main(int argc, char **argv){
     }
     setenv("NFSU2_GPS_DISTANCE", "1", 1);
     g_mem = calloc(1, 0x1000000); assert(g_mem);
+    memset(g_cbits, 0xff, (0x1000000u >> 14) / 8);
     MR8(0x8385b9) = 1; MR8(0x83aa1a) = 1;
     for (unsigned s = 0; s < 2; ++s){
         uint32_t p = 0x10000 + s * 0x1000, hud = p + 0xa00, car = p + 0xb00, part = p + 0xc00;
@@ -73,8 +75,20 @@ int main(int argc, char **argv){
         MRF32(car + 0x50) = s ? 1200 : 300; MRF32(car + 0x54) = s ? 1600 : 400;
     }
     update(0); update(1);
+    CPU snapshot = {0}; snapshot.esp = 0x100000; CPU before = snapshot;
+    float metres = -1; int metric = -1;
+    assert(gpsdistance_read(&snapshot, 0x10000, &metres, &metric) && metres == 500 && metric == 1);
+    assert(!memcmp(&snapshot, &before, sizeof snapshot));
+    uint32_t saved_hud = MR32(0x10000 + PLAYER_HUD);
+    MR32(0x10000 + PLAYER_HUD) = 0x30000000;
+    assert(!gpsdistance_read(&snapshot, 0x10000, &metres, &metric));
+    MR32(0x10000 + PLAYER_HUD) = saved_hud;
     assert(visible[0] && visible[1] && clones == 2);
     text_is(0, "500 m"); text_is(1, "2.0 km");
+    gpsdistance_set_enabled(0); update(0); update(1);assert(!visible[0] && !visible[1] && clones==2);
+    assert(!gpsdistance_read(&snapshot,0x10000,&metres,&metric));
+    gpsdistance_set_enabled(1); update(0); update(1);assert(visible[0] && visible[1] && clones==2);
+    gpsdistance_set_enabled(7); update(0);assert(visible[0]);
     unsigned previous = writes; update(1); assert(writes == previous);
     MR8(0x83aa1a) = 0; update(0); update(1);
     text_is(0, "1640 ft"); text_is(1, "1.2 mi");

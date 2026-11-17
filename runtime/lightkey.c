@@ -92,6 +92,11 @@ static struct {
     unsigned long taps, holds;
     unsigned long fl_cars, fl_hl, fl_scaled, fl_cars_hi, rd_set;   /* (counts for "lights report") */
 } K = { .test = -1, .last = -1 };
+static int g_profile_mode=-1,g_profile_high;
+void lightkey_set_mode(int mode){
+    if(mode<0 || mode>2)return;
+    g_profile_mode=mode;K.off=mode==LK_OFF;g_profile_high=mode==LK_HIGH;
+}
 
 /* high beam (option D of the rendered variants, the one picked): the flares' strength times hi_flare, the road light times hi_gain and
  * aimed hi_pitch degrees higher (headlights.c) */
@@ -116,8 +121,12 @@ static int driving(void){
 
 /* our lights now: high beam while held, else off when tapped off */
 int lightkey_mine(void){
+    if(g_profile_mode<0){
+        const char *v=getenv("NFSU2_PLAYER_HEADLIGHTS");
+        lightkey_set_mode(v&&!strcasecmp(v,"off")?LK_OFF:v&&!strcasecmp(v,"high")?LK_HIGH:LK_NORMAL);
+    }
     if (K.test >= 0) return K.test;
-    return K.flash ? LK_HIGH : K.off ? LK_OFF : LK_NORMAL;
+    return K.flash ? LK_HIGH : K.off ? LK_OFF : g_profile_high ? LK_HIGH : LK_NORMAL;
 }
 /* a car's lights: ours, a friend's (as its player has them), any other car's as the game has them */
 int lightkey_state(uint32_t car){

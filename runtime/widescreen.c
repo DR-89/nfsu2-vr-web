@@ -134,6 +134,16 @@ void ws_set_mapping(float k){
     }
     g_k = k;
 }
+/* Captured FEng geometry uses its original 640x480 anchors. Force cached
+ * transforms to rebuild on both entry and exit, as after a device resize. */
+static int g_cockpit_hud;
+void ws_cockpit_hud(int active){
+    active = !!active;
+    if (active == g_cockpit_hud) return;
+    long metal_frames(void);
+    g_cockpit_hud = active;
+    g_redirty_until = metal_frames() + 3; g_redirty_cap = 100000;
+}
 /* The test script's "fovscale MODE" (autotest.c), for an A/B in one run. */
 int ws_set_fov_scale(const char *mode){
     ws_init();
@@ -192,6 +202,7 @@ static const struct { int16_t x, y; int8_t side; } g_anchor[] = {
 };
 /* x offset for the element anchored at (x, y); 0 if it is not anchored. */
 static float hud_shift(float x, float y){
+    if (g_cockpit_hud) return 0.f;
     if (g_hud != HUD_WIDE) return 0.f;
     float extra = hud_extra_x();
     if (extra <= 0.f) return 0.f;

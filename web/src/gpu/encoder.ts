@@ -1,3 +1,5 @@
+import type { DriverRenderer } from '../vr/driver-renderer';
+import {driverViewSlot} from '../vr/drivers';
 // The WebGPU encoder: applies the resource queue and turns a handed-off frame
 // (runtime/web/gpu_web.c records) into render passes.  A port of the encode
 // half of runtime/metal.m,
@@ -20,6 +22,8 @@
 // in stream order) rather than a global read at encode time; scaled blits do
 // not blend; draws into a texture that no longer exists are dropped (the Mac
 // drew them on the screen).
+import { identity, vertexStereo } from '../vr/math';
+import {sharedPrelude} from './stereo-prepass';
 import * as P from './proto';
 import { D, F, Kind, Op } from './proto';
 import { COPY, FF_FS, MS_RESOLVE, TONE, TVERT_VS } from './wgsl';
@@ -45,6 +49,7 @@ interface Tex {
   astc: boolean;                   // DXT1 on a GPU with ASTC but not BC: ASTC 4x4, rewritten on upload (astc.ts)
   filled: boolean;                 // a level has gone up (an ASTC texture's choice is made at its first upload)
   bytes: number;                   // its size on the GPU, every level and face
+  eyeVariants?: Tex[];            // full-screen post effects at the eye raster size
   face0?: GPUTextureView;          // a cube's face 0, level 0 as a 2D view (StretchRect from it), made at its first use
   ms?: MsTwin;                     // a render target made with TF_MS: its 4-sample twin (runtime/com.c MULTISAMPLING)
 }
@@ -75,6 +80,75 @@ const CMP: GPUCompareFunction[] = ['always', 'never', 'less', 'equal', 'less-equ
 const ADDR: GPUAddressMode[] = ['repeat', 'repeat', 'mirror-repeat', 'clamp-to-edge', 'clamp-to-edge', 'mirror-repeat'];
 
 export class Encoder {
+  private eyeTargets = new Map<number, Tex>();
+  /** Follow full-screen copies through the post-effect chain. Keeping these at
+   * the window size discards the stereo scene's detail before the final quad. */
+  private prepareEyeTargets(enc: GPUCommandEncoder, dw: number, count: number, guestW: number, guestH: number, width: number, height: number): void {
+    this.eyeTargets.clear();
+    if (width === guestW && height === guestH) return;
+    const eligible = (id: number) => { const t = this.tex[id]; return t?.rt && !t.cube && t.levels === 1 && t.w === guestW && t.h === guestH; };
+    const ids = new Set<number>(), u = this.u32;
+    for (let i = 0; i < count; i++) {
+      const w = dw + i * P.DRAW_WORDS, id = u[w + D.target];
+      if (!id || !eligible(id)) continue;
+      const kind = u[w + D.kind];
+      const fromScreen = kind === Kind.Blit && !u[w + D.blitSrc] && !u[w + D.count];
+      const fromEffect = kind === Kind.Blit ? ids.has(u[w + D.blitSrc]) : kind === Kind.Draw &&
+        [D.tex, D.tex1, D.tex2, D.tex3].some(k => ids.has(u[w + k]));
+      if (fromScreen || fromEffect) ids.add(id);
+    }
+    for (const id of ids) {
+      const original = this.tex[id]!, variants = original.eyeVariants ??= [];
+      let t = variants.find(t => t.w === width && t.h === height);
+      if (!t) {
+        const tex = this.device.createTexture({ label: `VR effect t${id}`, size: [width, height], format: original.tex.format,
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+        let ms: MsTwin | undefined;
+        if (original.ms) {
+          const mt = this.device.createTexture({ label: `VR effect t${id} x4`, size: [width, height], format: tex.format, sampleCount: 4,
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
+          ms = { tex: mt, view: mt.createView(), stale: true };
+        }
+        t = { ...original, serial: this.serial++, tex, view: tex.createView(), rtViews: [tex.createView()], w: width, h: height,
+          bytes: width * height * 4 * (ms ? 5 : 1), ms, eyeVariants: undefined };
+        this.texBytes += t.bytes; this.texMadeBytes += t.bytes; this.texMade++;
+        // A first-frame history read must have the same contents as flat play.
+        this.copyQuad(enc, original.view, t.view, tex.format, this.linear);
+        variants.push(t);
+        if (variants.length > 2) {
+          const old = variants.shift()!; this.destroyLater.push(old.tex); if (old.ms) this.destroyLater.push(old.ms.tex);
+          this.texBytes -= old.bytes; this.texFreedBytes += old.bytes; this.texFreed++;
+        }
+      }
+      this.eyeTargets.set(id, t);
+    }
+  }
+  private drawTexture(id: number): Tex | undefined { return this.eyeTargets.get(id) ?? this.tex[id]; }
+  private prelude={seq:-1,buffer:-1,end:0};
+  private hudSeq=-1;
+  private rearCapture:{seq:number;color:GPUTexture;depth:GPUTexture}|null=null;
+  private rearSize:{id:number;serial:number;w:number;h:number;zid:number}|null=null;
+  /** Resize the actual rear raster, including its depth. The guest keeps its
+   * original dimensions; leaving the cockpit restores that target exactly. */
+  private prepareRear(rear:{target:number;zid:number}|null):number{
+    let saved=this.rearSize;
+    if(saved && this.tex[saved.id]?.serial!==saved.serial)this.rearSize=saved=null;
+    if(saved && (!rear || saved.id!==rear.target || saved.zid!==rear.zid)){
+      const t=this.tex[saved.id]!;this.texCreate(saved.id,saved.w,saved.h,1,t.fmt,P.TF_RT);this.forgetDepth(saved.zid);
+      this.rearSize=saved=null;this.rearCapture=null;
+    }
+    if(!rear || !this.drivers?.mirrors)return 1;
+    const t=this.tex[rear.target];if(!t?.rt || t.cube || t.ms || t.levels!==1)return 1;
+    const requested=this.drivers.mirrors.resolution??256;
+    const width=Math.min(this.device.limits.maxTextureDimension2D,[256,512,1024,2048,4096].includes(requested)?requested:1024);
+    const w=saved?.w??t.w,h=saved?.h??t.h,height=Math.max(1,Math.round(width*h/w));
+    if(height>this.device.limits.maxTextureDimension2D)return 1;
+    if(t.w!==width || t.h!==height){
+      this.texCreate(rear.target,width,height,1,t.fmt,P.TF_RT);this.forgetDepth(rear.zid);this.rearCapture=null;
+      this.rearSize={id:rear.target,serial:this.tex[rear.target]!.serial,w,h,zid:rear.zid};
+    }
+    return width/w;
+  }
   private regionClearPipes = new Map<string, GPURenderPipeline>();
   /** Attachment clears ignore viewports. A triangle clears only this player's
    * pixels and preserves the colour/depth belonging to the other players. */
@@ -121,6 +195,7 @@ export class Encoder {
   private white!: Tex; private whiteCube!: Tex;
   private zTex: (GPUTexture | undefined)[] = [];
   private zView: (GPUTextureView | undefined)[] = [];
+  private primaryDepth = new Map<string,{texture:GPUTexture;view:GPUTextureView}>();
   private zpend = new Uint8Array(64); private zpendV = new Float32Array(64);
   private scratchZ = new Map<string, GPUTextureView>();
   private pool: GPUBuffer | null = null;
@@ -130,15 +205,21 @@ export class Encoder {
   private pipes = new Map<number, GPURenderPipeline | null>();
   private bg1 = new Map<string, GPUBindGroup>();
   private destroyLater: { destroy(): void }[] = [];
+  private blitScratch = new Map<string,{texture:GPUTexture;view:GPUTextureView}>();
 
   // per-frame buffers (one each: writeBuffer is ordered before the next submit)
   private tvBuf: GPUBuffer; private rawBuf: GPUBuffer; private kBuf: GPUBuffer; private pBuf: GPUBuffer;
   private bufGen = 0; private bg0: (GPUBindGroup | null)[] = [null, null, null]; private bg0Gen = -1;
   private pStage = new Float32Array(192 * 1024);
+  private pOffsets = new Int32Array(0);
+  private uploadedFrame: { seq: number; buffer: number; draws: number; slots: number;
+    scene: ReturnType<DriverRenderer['updateScene']> | undefined } | null = null;
   // per-draw scratch, reused so that a draw allocates nothing: group 0's dynamic
   // offsets, and the group 1 tuple of the previous draw (cube, 4 texture serials,
   // 4 sampler keys; [0] = -1 when the pass has none bound yet)
-  private dyn = new Uint32Array(3);
+  private dyn = new Uint32Array(4);
+  drivers: DriverRenderer | null = null;
+  private eyeBuf!: GPUBuffer;
   private b1 = new Int32Array(9);
 
   // layouts and built-in pipelines
@@ -218,6 +299,8 @@ export class Encoder {
     const abi = createShaderAbi(d);
     this.bgl0 = abi.group0; this.bgl1 = abi.group1; this.bgl1c = abi.group1Cube;
     this.pl2d = abi.layout2d; this.plCube = abi.layoutCube;
+    this.eyeBuf = d.createBuffer({ label: 'VR eye transform', size: 512, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    d.queue.writeBuffer(this.eyeBuf, 0, identity()); d.queue.writeBuffer(this.eyeBuf, 256, identity());
     this.tvertMod = this.module('tvert', TVERT_VS);
     this.ffMod = this.module('ff', FF_FS(false));
     this.ffCubeMod = this.module('ff-cube', FF_FS(true));
@@ -237,6 +320,7 @@ export class Encoder {
   }
 
   private module(label: string, code: string): GPUShaderModule {
+    if (label === 'tvert' || label.startsWith('vs_')) code = vertexStereo(code);
     const m = this.device.createShaderModule({ label, code });
     m.getCompilationInfo().then(ci => { for (const e of ci.messages) if (e.type === 'error') this.log(`[gpu] WGSL ${label}:${e.lineNum}: ${e.message}`); });
     return m;
@@ -298,7 +382,7 @@ export class Encoder {
           this.warmUp();
           break;
         }
-        case Op.ZForget: if (a0 < 64 && this.zTex[a0]) { this.zTex[a0]!.destroy(); this.zTex[a0] = undefined; this.zView[a0] = undefined; }
+        case Op.ZForget: if (a0 < 64) this.forgetDepth(a0);
           for (const [k, z] of this.msZ) if (k.startsWith(`${a0}:`)) { z.tex.destroy(); this.msZ.delete(k); } break;
         case Op.BbSamples: this.setBbSamples(a0); break;
         case Op.SkinHq: this.skinHq(a0, a1, a2, data); break;
@@ -376,6 +460,10 @@ export class Encoder {
     if (this.hqWant.size) this.overGone(id);
     const t = this.tex[id];
     if (!t) return;
+    for (const eye of t.eyeVariants ?? []) {
+      eye.tex.destroy(); eye.ms?.tex.destroy(); this.texBytes -= eye.bytes; this.texFreedBytes += eye.bytes; this.texFreed++;
+    }
+    this.eyeTargets.delete(id);
     t.tex.destroy(); t.ms?.tex.destroy();
     this.texBytes -= t.bytes; if (t.unpack) this.unpackBytes -= t.bytes; if (t.astc) this.astcBytes -= t.bytes;
     this.texFreed++; this.texFreedBytes += t.bytes;
@@ -583,8 +671,8 @@ export class Encoder {
 
   /** draw `src` over the whole of `dst` (StretchRect between sizes, composite) */
   copyQuad(enc: GPUCommandEncoder, src: GPUTextureView, dst: GPUTextureView, format: GPUTextureFormat, smp: GPUSampler,
-           vp?: [number, number, number, number], opaque = false, ts?: GPURenderPassTimestampWrites): void {
-    const pass = enc.beginRenderPass({ colorAttachments: [{ view: dst, loadOp: 'clear', clearValue: [0, 0, 0, 1], storeOp: 'store' }], timestampWrites: ts });
+           vp?: [number, number, number, number], opaque = false, ts?: GPURenderPassTimestampWrites, load = false): void {
+    const pass = enc.beginRenderPass({ colorAttachments: [{ view: dst, loadOp: load?'load':'clear', clearValue: [0, 0, 0, 1], storeOp: 'store' }], timestampWrites: ts });
     pass.setPipeline(this.copyPipe(format, opaque));
     pass.setBindGroup(0, this.copyBg(src, smp));
     if (vp) pass.setViewport(vp[0], vp[1], vp[2], vp[3], 0, 1);
@@ -623,7 +711,7 @@ export class Encoder {
     pass.end();
   }
 
-  private pipeDesc(key: number, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean, ms = false): GPURenderPipelineDescriptor | null {
+  private pipeDesc(key: number, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean, ms = false, hud = false): GPURenderPipelineDescriptor | null {
     // the translator's modules (vs_0 / ps_0 / ps_256 included once registered), else the built-in fallbacks
     const cube = ps >= PSCUBE;
     const vq = this.vsMods.get(vs), pq = this.psMods.get(ps);
@@ -639,11 +727,12 @@ export class Encoder {
       if (sf === 13) { s = 'one-minus-src-alpha'; d = 'src-alpha'; }   // BOTHINVSRCALPHA
       if (mm) { s = 'one'; d = 'one'; }                          // WebGPU: min/max take factor one (D3D ignores them)
       bs = { color: { srcFactor: s, dstFactor: d, operation: o }, alpha: { srcFactor: s, dstFactor: d, operation: o } };
+      if(hud)bs.alpha={srcFactor:'one',dstFactor:'one-minus-src-alpha',operation:'add'};
     }
     return {
       label: `p${key}`, layout: cube ? this.plCube : this.pl2d,
       vertex: { module: vmod, entryPoint: vq ? undefined : 'vs_tvert' },
-      fragment: { module: fmod, entryPoint: pq ? undefined : 'fs_ff', targets: [{ format: 'bgra8unorm', blend: bs, writeMask: mask }],
+      fragment: { module: fmod, entryPoint: pq ? undefined : 'fs_ff', targets: [{ format: 'bgra8unorm', blend: bs, writeMask: hud ? mask|8 : mask }],
         constants: { ALPHA_FUNC: alphaFunc(nd ? 0 : 1) } },
       primitive: { topology: 'triangle-list', frontFace: 'cw', cullMode: cull === 1 ? 'none' : cull === 2 ? 'front' : 'back' },
       depthStencil: { format: 'depth32float', depthWriteEnabled: (dm & 2) !== 0, depthCompare: (dm & 1) ? CMP[(dm >> 2) & 7] : 'always' },
@@ -653,9 +742,9 @@ export class Encoder {
   }
 
   /** a pipeline needed now: created synchronously (a first use may hitch; warmUp() avoids most) */
-  private pipeline(key: number, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean, ms = false): GPURenderPipeline | null {
+  private pipeline(key: number, blend: number, ps: number, vs: number, cull: number, dm: number, nd: boolean, ms = false, hud = false): GPURenderPipeline | null {
     const pipes = ms ? this.pipesMs : this.pipes;
-    const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd, ms);
+    const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd, ms, hud);
     if (!desc) { pipes.set(key, null); return null; }
     this.device.pushErrorScope('validation');
     const tp = performance.now();
@@ -669,7 +758,7 @@ export class Encoder {
     // off, 4 samples at 2^35; an entry from before the samples has 1)
     const vh = this.vsHash.get(vs), ph = this.psHash.get(ps);
     if (vh !== undefined && ph !== undefined) {
-      const st = blend + cull * 262144 + dm * 1048576 + (nd ? 67108864 : 0) + (ms ? 34359738368 : 0), k = `${vh}:${ph}:${st}`;
+      const st = blend + cull * 262144 + dm * 1048576 + (nd ? 67108864 : 0) + (ms ? 34359738368 : 0) + (hud ? 68719476736 : 0), k = `${vh}:${ph}:${st}`;
       if (!this.warmSeen.has(k)) { this.warmSeen.add(k); this.warmList.push({ v: vh, p: ph, s: st }); this.warmDirty = true; }
     }
     return p;
@@ -704,9 +793,10 @@ export class Encoder {
       if (vs === undefined || ps === undefined) return true;
       const blend = e.s % 262144, cull = Math.floor(e.s / 262144) % 4, dm = Math.floor(e.s / 1048576) % 64;
       const nd = Math.floor(e.s / 67108864) % 2 === 1, ms = Math.floor(e.s / 34359738368) % 2 === 1, pipes = ms ? this.pipesMs : this.pipes;
-      const key = blend + ps * 262144 + vs * 268435456 + cull * 137438953472 + dm * 549755813888 + (nd ? 35184372088832 : 0);
+      const hud=Math.floor(e.s/68719476736)%2===1;
+      const key = blend + ps * 262144 + vs * 268435456 + cull * 137438953472 + dm * 549755813888 + (nd ? 35184372088832 : 0) + (hud ? 70368744177664 : 0);
       if (pipes.has(key)) return false;
-      const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd, ms);
+      const desc = this.pipeDesc(key, blend, ps, vs, cull, dm, nd, ms, hud);
       if (!desc) return false;
       this.device.createRenderPipelineAsync(desc).then(p => {
         if (!pipes.has(key)) { pipes.set(key, p); this.pipelinesMade++; this.pipelinesAsync++; }
@@ -725,10 +815,21 @@ export class Encoder {
         { binding: 1, resource: { buffer: this.kBuf, size: KWIN_SIZE } },
         { binding: 2, resource: { buffer: this.pBuf, size: PSPAR_BYTES } },
         // the frame's other cars' headlights, in its VS constant arena (gpu_proto.h GwHL)
-        { binding: 3, resource: { buffer: this.kBuf, size: HLPAR_SIZE } }] });
+        { binding: 3, resource: { buffer: this.kBuf, size: HLPAR_SIZE } },
+        { binding: 4, resource: { buffer: this.eyeBuf, size: 64 } }] });
       this.bg0[src] = g;
     }
     return g;
+  }
+
+  private forgetDepth(id:number):void {
+    const z=this.zTex[id];
+    if(id===1){
+      for(const p of this.primaryDepth.values())if(p.texture!==z)this.destroyLater.push(p.texture);
+      this.primaryDepth.clear();
+    }
+    if(z)this.destroyLater.push(z);
+    this.zTex[id]=undefined;this.zView[id]=undefined;
   }
 
   private depthView(zid: number, w: number, h: number, ms = false): GPUTextureView {
@@ -775,16 +876,29 @@ export class Encoder {
    * the submit are the caller's.  With `direct`, a bgra8unorm texture with
    * RENDER_ATTACHMENT, TEXTURE_BINDING, COPY_SRC and COPY_DST usage (the canvas
    * texture), the frame draws its screen straight into it when the sizes match:
-   * the same passes, one full-screen copy fewer. */
-  encodeFrame(b: number, enc: GPUCommandEncoder, direct?: GPUTexture): EncodeStats {
+   * the same passes, one full-screen copy fewer. A stereo replay uses the eye's
+   * dimensions; guest viewports and screen-copy rectangles scale with it. */
+  encodeFrame(b: number, enc: GPUCommandEncoder, direct?: GPUTexture, eye?: Float32Array<ArrayBuffer>, reuseUploads = false): EncodeStats {
+    this.device.queue.writeBuffer(this.eyeBuf, 0, eye ?? identity());
     const t0 = performance.now();
     this.drawClock++;
     this.views();
     const u32 = this.u32, i32 = this.i32, f32 = this.f32, dev = this.device;
     const fw = this.ctlW + P.C.frame + b * (P.FRAME_BYTES >> 2);
     const dn = u32[fw + F.dn], vn = u32[fw + F.vn], rvn = u32[fw + F.rvn], kn = u32[fw + F.kn];
+    const seq = u32[fw + F.seq], uploaded = this.uploadedFrame;
+    reuseUploads = !!eye && reuseUploads && uploaded?.seq === seq && uploaded.buffer === b && uploaded.draws === dn;
+    this.uploadedFrame = null;
+    // Menu-only frames have no opaque world draw. They must still release
+    // cockpit input/poses, rather than retaining the previous driving frame.
+    const driverScene=reuseUploads ? uploaded!.scene : this.drivers?.updateScene(this.u32.buffer,u32[fw+F.k],kn);
+    const rear=driverScene?.cockpit && driverScene.mirrors?.active?driverScene.mirrors:null;
+    const rearScale=this.prepareRear(rear);
     const drawsW = u32[fw + F.draws] >>> 2, pscW = u32[fw + F.psc] >>> 2;
-    const bbW = u32[fw + F.bbW] || 1280, bbH = u32[fw + F.bbH] || 720;
+    const guestW = u32[fw + F.bbW] || 1280, guestH = u32[fw + F.bbH] || 720;
+    const bbW = eye && direct ? direct.width : guestW, bbH = eye && direct ? direct.height : guestH;
+    if (eye) this.prepareEyeTargets(enc, drawsW, dn, guestW, guestH, bbW, bbH);
+    else this.eyeTargets.clear();
     let isDirect = !!direct && direct.width === bbW && direct.height === bbH;
     if (isDirect && this.readsScreenFirst(drawsW, dn)) {
       if (this.screenReadFirst++ === 0) this.log(`[gpu] frame ${u32[fw + F.seq]} copies from the screen before drawing to it: drawn into the back buffer`);
@@ -795,20 +909,32 @@ export class Encoder {
       // the back buffer of earlier frames (before the canvas size settled) is not needed
       if (this.bb) { this.destroyLater.push(this.bb); this.bb = null; this.bbView = null; }
     } else { this.ensureBackBuffer(bbW, bbH); this.screen = this.bb; this.screenView = this.bbView; }
-    const seq = u32[fw + F.seq];
+    if(eye && !reuseUploads)this.prelude={seq,buffer:b,end:sharedPrelude(u32,drawsW,dn)};
+    const reusePrelude=eye && reuseUploads && this.prelude.seq===seq && this.prelude.buffer===b?this.prelude.end:0;
+    const reuseRear=!!eye && !!rear && this.rearCapture?.seq===seq && this.rearCapture.color===this.tex[rear.target]?.tex && this.rearCapture.depth===this.zTex[rear.zid];
+    let rearDrawn=false;
+    const hud=this.drivers?.hud,captureHud=!!hud && this.hudSeq!==seq;
+    let hudTouched=false;
     this.tr = this.traceSeq.has(seq) || (this.traceDumps && u32[fw + F.dump]) ? [] : null;
     const tr = this.tr;
     if (tr) tr.push(`[trace] frame ${seq}: ${dn} records, ${vn} tverts, raw ${rvn} B, consts ${kn} B, back buffer ${bbW}x${bbH}, clear ${u32[fw + F.clearArgb].toString(16)}`);
 
-    // arenas: one writeBuffer each, in the queue before this frame's submit
+    // Both eyes use the same immutable vertex and pixel constants. Keep offsets
+    // by record: shared prepasses/HUD can skip draws in the second eye, so its
+    // compacted draw order is not a valid index into the first eye's uniforms.
     const SV = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, UV = GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST;
-    if (vn) { this.tvBuf = this.grow(this.tvBuf, vn * P.TVERT_BYTES, 'tvert', SV); this.queue.writeBuffer(this.tvBuf, 0, this.u8.subarray(u32[fw + F.tv], u32[fw + F.tv] + vn * P.TVERT_BYTES)); }
-    if (rvn) { const n = (rvn + 3) & ~3; this.rawBuf = this.grow(this.rawBuf, n, 'raw', SV); this.queue.writeBuffer(this.rawBuf, 0, this.u8.subarray(u32[fw + F.raw], u32[fw + F.raw] + n)); }
-    if (kn) { const n = (kn + 3) & ~3; this.kBuf = this.grow(this.kBuf, n + KWIN_SIZE, 'vsconst', UV); this.queue.writeBuffer(this.kBuf, 0, this.u8.subarray(u32[fw + F.k], u32[fw + F.k] + n)); }
+    if (!reuseUploads) {
+      if (vn) { this.tvBuf = this.grow(this.tvBuf, vn * P.TVERT_BYTES, 'tvert', SV); this.queue.writeBuffer(this.tvBuf, 0, this.u8.subarray(u32[fw + F.tv], u32[fw + F.tv] + vn * P.TVERT_BYTES)); }
+      if (rvn) { const n = (rvn + 3) & ~3; this.rawBuf = this.grow(this.rawBuf, n, 'raw', SV); this.queue.writeBuffer(this.rawBuf, 0, this.u8.subarray(u32[fw + F.raw], u32[fw + F.raw] + n)); }
+      if (kn) { const n = (kn + 3) & ~3; this.kBuf = this.grow(this.kBuf, n + KWIN_SIZE, 'vsconst', UV); this.queue.writeBuffer(this.kBuf, 0, this.u8.subarray(u32[fw + F.k], u32[fw + F.k] + n)); }
+    }
     this.pBuf = this.grow(this.pBuf, (dn + 1) * PSLOT, 'pspar', UV);
     if (this.pStage.length < (dn + 1) * (PSLOT / 4)) this.pStage = new Float32Array((dn + 64) * (PSLOT / 4));
+    if (this.pOffsets.length < dn) this.pOffsets = new Int32Array(dn + 64);
+    if (!reuseUploads) this.pOffsets.fill(-1, 0, dn);
     const ps = this.pStage;
-    let pslots = 0, lastPsci = -1, lastAref = NaN;
+    const uploadedSlots = reuseUploads ? uploaded!.slots : 0;
+    let pslots = uploadedSlots, lastPsci = -1, lastAref = NaN;
     const lastPF = new Float32Array(8);
 
     let pass: GPURenderPassEncoder | null = null;
@@ -819,17 +945,29 @@ export class Encoder {
     let cPipe: GPURenderPipeline | null = null, cSrc = -1, cK = -1, cP = -1, cBcol = -1, cIx = '';
     // the pass's size, the scissor in effect in it (a GwDraw.clip value; 0 = the whole target), whether a split
     // screen's cells came in it (passCells: viewports and scissors then by viewport.ts), the headlights block bound
-    let passW = 0, passH = 0, cClip = 0, passCells = false, cH = -1;
+    let passW = 0, passH = 0, cClip = 0, passCells = false, cH = -1, cEye = -1;
     // the viewport and scissor in effect in the pass (when it opens WebGPU's: the whole target), and the draw's
     // (viewport.ts fills them in place, so a draw allocates nothing and sets either only when it changes)
     const vpNow = [0, 0, 0, 0, 0, 1], vpDraw = [0, 0, 0, 0, 0, 1], scNow = [0, 0, 0, 0], scDraw = [0, 0, 0, 0];
+    const viewport=(w:number,target:number)=>{
+      if(eye && (!target || this.eyeTargets.has(target)) && f32[w+D.viewport+2]){
+        for(let k=0;k<6;k++)vpDraw[k]=f32[w+D.viewport+k]*(k<4?(k%2?bbH/guestH:bbW/guestW):1);
+        return drawViewport(vpDraw,0,passW,passH,vpDraw);
+      }
+      if(rear && target===rear.target && rearScale!==1 && f32[w+D.viewport+2]){
+        for(let k=0;k<6;k++)vpDraw[k]=f32[w+D.viewport+k]*(k<4?rearScale:1);
+        return drawViewport(vpDraw,0,passW,passH,vpDraw);
+      }
+      return drawViewport(f32,w+D.viewport,passW,passH,vpDraw);
+    };
     // the previous draw's pipeline (pipelines outlive passes, so this survives a pass change)
     let lastKey = -1, lastMs = false, lastPipe: GPURenderPipeline | null | undefined;
     // the pass draws at 4 samples: the screen of a multisampled back buffer, or a TF_MS target (runtime/com.c MULTISAMPLING)
     let passMs = false;
     const b1 = this.b1, dyn = this.dyn;
     b1[0] = -1;
-    let draws = 0, passes = 0, skipped = 0;
+    let draws = 0, passes = 0, skipped = 0, driverViews = 0;
+    const primaryViewport:number[]=[],primaryScissor:number[]=[];
     // the twin of the pass that is open and its target's view: resolved (msResolve) as the pass ends
     let msOut: { twin: MsTwin; dst: GPUTextureView } | null = null;
     const endPass = () => {
@@ -839,6 +977,14 @@ export class Encoder {
     };
 
     const openPass = (target: number, zid: number): GPURenderPassEncoder | null => {
+      if(target===-2 && hud){
+        passW=1280;passH=960;passKey=-2;passCube=-1;passMs=false;realZ=false;
+        vpNow.splice(0,6,0,0,passW,passH,0,1);scNow.splice(0,4,0,0,passW,passH);cClip=0;passCells=false;
+        const p=enc.beginRenderPass({label:'Capture original cockpit HUD',colorAttachments:[{view:hud.view,loadOp:hudTouched?'load':'clear',storeOp:'store',clearValue:[0,0,0,0]}],depthStencilAttachment:{view:this.depthView(0,passW,passH),depthLoadOp:'clear',depthClearValue:1,depthStoreOp:'discard'}});
+        hudTouched=true;passes++;this.calls.pass++;
+        cPipe=null;cSrc=-1;cK=-1;cP=-1;b1[0]=-1;cBcol=-1;cIx='';cH=-1;
+        return p;
+      }
       let view: GPUTextureView, w: number, h: number, key: number;
       // a 4-sample target: its twin, and the view its picture is drawn into the twin from
       let twin: MsTwin | null = null, twinSrc: GPUTextureView | null = null;
@@ -846,7 +992,7 @@ export class Encoder {
         view = this.screenView!; w = bbW; h = bbH; key = -1; passCube = -1;
         if (this.bbSamples === 4) { twin = this.screenTwin(w, h); twinSrc = view; }
       } else {
-        const t = this.tex[target & 0xFFFF], face = (target >>> 16) & 7;
+        const t = this.drawTexture(target & 0xFFFF), face = (target >>> 16) & 7;
         if (!t || !t.rt) { this.missingTarget++; return null; }
         view = t.cube ? t.rtViews[face ? Math.min(face - 1, 5) : 0] : t.rtViews[0];
         w = t.w; h = t.h; key = (target & 0xFFFF) * 8 + face; passCube = target & 0xFFFF;
@@ -890,9 +1036,25 @@ export class Encoder {
         let z = this.zTex[zid];
         if (!z || z.width !== w || z.height !== h) {
           if (!z || zid === 1) {
-            if (z) this.destroyLater.push(z);
-            z = this.zTex[zid] = dev.createTexture({ label: `z${zid} ${w}x${h}`, size: [w, h], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT });
-            this.zView[zid] = z.createView(); zclear = true;
+            // Stereo alternates eye-sized world passes and guest-sized effects
+            // eight times per frame. Keep the allocations, but clear on every
+            // size switch just as a newly created depth attachment would.
+            const key=`${w}x${h}`;
+            let cached=zid===1?this.primaryDepth.get(key):undefined;
+            if (!cached) {
+              if (z && ![...this.primaryDepth.values()].some(p=>p.texture===z)) this.destroyLater.push(z);
+              const texture=dev.createTexture({ label: `z${zid} ${w}x${h}`, size: [w, h], format: 'depth32float', usage: GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING });
+              cached={texture,view:texture.createView()};
+              if(zid===1 && w*h*4<=64*1024*1024){
+                let bytes=[...this.primaryDepth.values()].reduce((n,p)=>n+p.texture.width*p.texture.height*4,0);
+                while(this.primaryDepth.size && (this.primaryDepth.size>=3 || bytes+w*h*4>64*1024*1024)){
+                  const oldest=this.primaryDepth.keys().next().value!,old=this.primaryDepth.get(oldest)!;
+                  bytes-=old.texture.width*old.texture.height*4;this.destroyLater.push(old.texture);this.primaryDepth.delete(oldest);
+                }
+                this.primaryDepth.set(key,cached);
+              }
+            } else if(z && ![...this.primaryDepth.values()].some(p=>p.texture===z)) this.destroyLater.push(z);
+            z=this.zTex[zid]=cached.texture;this.zView[zid]=cached.view;zclear=true;
           } else { z = undefined; this.zMismatch++; }
         }
         if (z) { zv = this.zView[zid]; if (this.zpend[zid]) { zclear = true; zval = this.zpendV[zid]; this.zpend[zid] = 0; } }
@@ -917,10 +1079,19 @@ export class Encoder {
 
     for (let i = 0; i < dn; i++) {
       const w = drawsW + i * P.DRAW_WORDS;
+      if(i<reusePrelude && u32[w+D.target] && u32[w+D.target]!==rear?.target){
+        // Preserve the stream's clear-colour state, but retain the completed
+        // mono images. Rear-view ownership has its own validation below.
+        if(u32[w+D.kind]===Kind.Clear && !f32[w+D.viewport+2] && (u32[w+D.clrFlags]&1))clearArgb=u32[w+D.clrArgb];
+        continue;
+      }
+      // One mono source per guest frame; both eyes reproject its colour and
+      // depth independently. Never clear/redraw it during the second eye.
+      if(reuseRear && u32[w+D.target]===rear!.target)continue;
       const kind = u32[w + D.kind];
       if (kind === Kind.Blit) {
         const sid = u32[w + D.blitSrc], tgt = u32[w + D.target];
-        const st = sid ? this.tex[sid & 0xFFFF] : null, dt = tgt ? this.tex[tgt & 0xFFFF] : null;
+        const st = sid ? this.drawTexture(sid & 0xFFFF) : null, dt = tgt ? this.drawTexture(tgt & 0xFFFF) : null;
         // Packed surface faces use 1..6; zero denotes an ordinary 2D target.
         const sf = Math.max(0, ((sid >>> 16) & 7) - 1), df = Math.max(0, ((tgt >>> 16) & 7) - 1);
         const sTex = sid ? st?.tex : this.screen!, dTex = tgt ? dt?.tex : this.screen!;
@@ -928,7 +1099,7 @@ export class Encoder {
         if (tr) tr.push(`  #${i} blit ${sid || 'SCREEN'}${r1 ? ` (${r0 & 0xFFFF},${r0 >>> 16})-(${r1 & 0xFFFF},${r1 >>> 16})` : ''} -> ${tgt ? tgt & 0xFFFF : 'SCREEN'}${!sTex || !dTex ? ' (missing: skipped)' : ''}`);
         if (!sTex || !dTex || sTex === dTex || (tgt && !dt!.rt)) { skipped++; continue; }
         endPass(); curT = -1; curZ = -1;
-        if (r1 && this.blitRect(enc, sTex, r0, r1, tgt ? dt!.rtViews[0] : this.screenView!, !sid)) passes++;
+        if (r1 && this.blitRect(enc, sTex, r0, r1, tgt ? dt!.rtViews[0] : this.screenView!, !sid, (!sid || this.eyeTargets.has(sid))?bbW/guestW:1, (!sid || this.eyeTargets.has(sid))?bbH/guestH:1)) passes++;
         else if (sTex.width === dTex.width && sTex.height === dTex.height && sTex.format === dTex.format && sf < sTex.depthOrArrayLayers && df < dTex.depthOrArrayLayers)
           { enc.copyTextureToTexture({ texture: sTex, origin: [0, 0, sf] }, { texture: dTex, origin: [0, 0, df] }, [sTex.width, sTex.height, 1]); this.calls.copy++; }
         else {
@@ -941,11 +1112,13 @@ export class Encoder {
         else { screenTouched = true; if (this.msScreen) this.msScreen.stale = true; }
         continue;
       }
-      const depth = u32[w + D.depth], zid = depth >>> 8, target = u32[w + D.target];
+      const isHud=kind===Kind.Draw && !!(u32[w+D.vrFlags]&P.VR_HUD) && !!hud;
+      if(isHud&&!captureHud)continue;
+      const depth = u32[w + D.depth], zid = isHud ? 0 : depth >>> 8, target = isHud ? -2 : u32[w + D.target];
       if (kind === Kind.Clear && f32[w + D.viewport + 2] > 0) {
         endPass(); curT = target; curZ = zid;
         pass = openPass(target, zid);
-        const vp = drawViewport(f32, w + D.viewport, passW, passH, vpDraw);
+        const vp = viewport(w,target);
         const z = f32[w + D.clrZ], flags = u32[w + D.clrFlags];
         if (pass && vp && Number.isFinite(z) && (flags & 3)) {
           pass.setViewport(vp[0], vp[1], vp[2], vp[3], 0, 1);
@@ -979,10 +1152,10 @@ export class Encoder {
       const p: GPURenderPassEncoder = pass;
       // a split screen's cell or effect region (GwDraw.viewport, clrFlags): from then on in this pass every draw
       // takes the general way; until then (and in any frame of one view) the whole target, as before split screen
-      const cell = f32[w + D.viewport + 2] !== 0 || u32[w + D.clrFlags] !== 0;
+      const cell = !isHud && (f32[w + D.viewport + 2] !== 0 || u32[w + D.clrFlags] !== 0);
       if (cell) passCells = true;
       if (passCells) {
-        if (!drawViewport(f32, w + D.viewport, passW, passH, vpDraw)) { skipped++; continue; }
+        if (!viewport(w,target)) { skipped++; continue; }
         if (vpDraw[0] !== vpNow[0] || vpDraw[1] !== vpNow[1] || vpDraw[2] !== vpNow[2] || vpDraw[3] !== vpNow[3]
             || vpDraw[4] !== vpNow[4] || vpDraw[5] !== vpNow[5]) {
           p.setViewport(vpDraw[0], vpDraw[1], vpDraw[2], vpDraw[3], vpDraw[4], vpDraw[5]);
@@ -1000,15 +1173,16 @@ export class Encoder {
       let psEff = psid > 0 && this.psMods.has(psid) ? psid : psid >= PSCUBE ? PSCUBE : 0;
       if (psEff === 0 && t0 && this.tex[t0]?.cube) psEff = PSCUBE;
       const nd = !(aref > 0);
-      const key = blend + psEff * 262144 + vsid * 268435456 + cull * 137438953472 + dm * 549755813888 + (nd ? 35184372088832 : 0);
+      const key = blend + psEff * 262144 + vsid * 268435456 + cull * 137438953472 + dm * 549755813888 + (nd ? 35184372088832 : 0) + (isHud ? 70368744177664 : 0);
       let pipe = key === lastKey && passMs === lastMs ? lastPipe : (passMs ? this.pipesMs : this.pipes).get(key);
-      if (pipe === undefined) pipe = this.pipeline(key, blend, psEff, vsid, cull, dm, nd, passMs);
+      if (pipe === undefined) pipe = this.pipeline(key, blend, psEff, vsid, cull, dm, nd, passMs, isHud);
       lastKey = key; lastMs = passMs; lastPipe = pipe;
       if (!pipe) { skipped++; if (tr) tr.push(`  #${i} draw skipped: no pipeline (ps ${psEff} vs ${vsid})`); continue; }
       if (pipe !== cPipe) { p.setPipeline(pipe); cPipe = pipe; this.calls.pipe++; }
       // the 2D UI on a screen narrower than 4:3 stays in its 4:3 band (gpu_proto.h GwDraw.clip), on the
       // back buffer or a target of its size
-      const clip = passW === bbW && passH === bbH ? u32[w + D.clip] : 0;
+      let clip = !isHud && ((!target) || this.eyeTargets.has(target) || passW === guestW && passH === guestH) ? u32[w + D.clip] : 0;
+      if(clip && eye && (!target || this.eyeTargets.has(target)))clip=Math.round((clip&65535)*bbH/guestH)|(Math.round((clip>>>16)*bbH/guestH)<<16);
       if (passCells) {
         // A viewport transforms coordinates; explicitly restrict rasterization
         // too. Screen-space quads and light sprites must stay in their cell.
@@ -1024,18 +1198,34 @@ export class Encoder {
         cClip = clip;
       }
 
-      // PS parameters: a new slot only when they differ from the previous draw's
-      const psci = u32[w + D.psci];
-      let same = psci === lastPsci && aref === lastAref;
-      if (same) for (let q = 0; q < 4; q++) if (lastPF[q] !== f32[w + D.proj + q] || lastPF[4 + q] !== f32[w + D.fogv + q]) { same = false; break; }
-      if (!same) {
-        const o = pslots * (PSLOT / 4);
-        ps[o] = aref; ps[o + 1] = 0; ps[o + 2] = 0; ps[o + 3] = 0;
-        for (let q = 0; q < 4; q++) { ps[o + 4 + q] = lastPF[q] = f32[w + D.proj + q]; ps[o + 136 + q] = lastPF[4 + q] = f32[w + D.fogv + q]; }
-        ps.set(f32.subarray(pscW + psci * 128, pscW + psci * 128 + 128), o + 8);
-        lastPsci = psci; lastAref = aref; pslots++;
+      // Insert drivers into each original player view, using its camera, depth
+      // and cell. Unowned full-target effects must not consume a player's draw.
+      const viewSlot=driverViewSlot(u32[w+D.vrFlags]>>>P.VR_VIEW_SHIFT&15);
+      if(viewSlot>=0 && (u32[w+D.vrFlags]&P.VR_PERSPECTIVE) && !(driverViews&1<<viewSlot) && this.drivers && !(u32[w+D.vrFlags]&P.VR_HUD) && target===0 && realZ && (depth&3)===3){
+        driverViews|=1<<viewSlot;
+        if(!viewSlot){primaryViewport.push(...vpNow);primaryScissor.push(...scNow);}
+        const added=this.drivers.draw(p,this.u32.buffer,u32[fw+F.k],kn,eye,passMs?4:1,false,false,driverScene,viewSlot);
+        if(added){draws+=added;endPass();pass=openPass(target,zid);i--;continue;}
       }
-      const poff = (pslots - 1) * PSLOT;
+      const driverSlot=u32[w+D.vrFlags]>>>P.VR_DRIVER_SHIFT&127;
+      if(driverSlot && viewSlot>=0 && target===0 && (driverViews&1<<viewSlot) && this.drivers?.replacesDriver(viewSlot,driverSlot))continue;
+
+      // A record already drawn by the other eye retains its uploaded slot.
+      // Newly visible records append slots without overwriting the first eye's.
+      let poff = this.pOffsets[i];
+      if (poff < 0) {
+        const psci = u32[w + D.psci];
+        let same = psci === lastPsci && aref === lastAref;
+        if (same) for (let q = 0; q < 4; q++) if (lastPF[q] !== f32[w + D.proj + q] || lastPF[4 + q] !== f32[w + D.fogv + q]) { same = false; break; }
+        if (!same) {
+          const o = pslots * (PSLOT / 4);
+          ps[o] = aref; ps[o + 1] = 0; ps[o + 2] = 0; ps[o + 3] = 0;
+          for (let q = 0; q < 4; q++) { ps[o + 4 + q] = lastPF[q] = f32[w + D.proj + q]; ps[o + 136 + q] = lastPF[4 + q] = f32[w + D.fogv + q]; }
+          ps.set(f32.subarray(pscW + psci * 128, pscW + psci * 128 + 128), o + 8);
+          lastPsci = psci; lastAref = aref; pslots++;
+        }
+        poff = this.pOffsets[i] = (pslots - 1) * PSLOT;
+      }
 
       // group 0: vertex source + VS constants + PS parameters.  K is a 64 KB window of the
       // frame's constant arena that many draws share: the draw's block is row kb of it, given
@@ -1045,11 +1235,12 @@ export class Encoder {
       const src = isz ? Src.Pool : vsid > 0 ? Src.Raw : Src.TVert;
       const koff = vsid > 0 ? u32[w + D.koff] : -1;
       const hoff = u32[w + D.blitSrc];
-      if (src !== cSrc || poff !== cP || hoff !== cH || (koff >= 0 && (cK < 0 || koff < cK || koff - cK > KWIN_SIZE - VSPAR_SIZE))) {
+      const eyeOffset = eye && !(u32[w+D.vrFlags]&P.VR_HUD) && !u32[w+D.target] && viewSlot===0 && (u32[w+D.vrFlags]&P.VR_PERSPECTIVE) ? 0 : 256;
+      if (src !== cSrc || poff !== cP || hoff !== cH || eyeOffset !== cEye || (koff >= 0 && (cK < 0 || koff < cK || koff - cK > KWIN_SIZE - VSPAR_SIZE))) {
         // the window starts at this draw's block (256-aligned below it); TVert draws read no K
         if (koff >= 0) cK = koff & ~255; else if (cK < 0) cK = 0;
-        dyn[0] = cK; dyn[1] = poff; dyn[2] = hoff;
-        p.setBindGroup(0, this.group0(src), dyn, 0, 3); cSrc = src; cP = poff; cH = hoff; this.calls.bg0++;
+        dyn[0] = cK; dyn[1] = poff; dyn[2] = hoff; dyn[3] = eyeOffset; cEye = eyeOffset;
+        p.setBindGroup(0, this.group0(src), dyn, 0, 4); cSrc = src; cP = poff; cH = hoff; this.calls.bg0++;
       }
       const kb = koff >= 0 ? (koff - cK) >> 4 : 0;
 
@@ -1093,7 +1284,33 @@ export class Encoder {
       } else if (vsid > 0) p.draw(count, 1, 0, kb);
       else p.draw(count, 1, u32[w + D.first], 0);
       draws++; this.calls.draw++;
-      if (tr) tr.push(`  #${i} ${isz ? `ix${isz * 8} ib ${u32[w + D.ixIb]} base ${i32[w + D.ixBase]}` : vsid > 0 ? 'raw' : `tvert ${u32[w + D.first]}`} n ${count} vs ${vsid} ps ${psid}${psEff !== psid ? `->${psEff}` : ''} blend ${blend.toString(16)} depth ${(depth & 63).toString(16)}${realZ ? '' : '(off)'} cull ${cull} aref ${aref.toFixed(3)} bcol ${bcol.toString(16)} tex ${t0}${v0.serial === 0 && t0 ? '(white)' : ''},${t1},${t2},${t3} smp ${s0.toString(16)} koff ${koff} kb ${kb} poff ${poff}`);
+      if(rear && target===rear.target && realZ && zid===rear.zid && (depth&3)===3)rearDrawn=true;
+      if (tr) tr.push(`  #${i} ${isz ? `ix${isz * 8} ib ${u32[w + D.ixIb]} base ${i32[w + D.ixBase]}` : vsid > 0 ? 'raw' : `tvert ${u32[w + D.first]}`} n ${count} vs ${vsid} ps ${psid}${psEff !== psid ? `->${psEff}` : ''} blend ${blend.toString(16)} depth ${(depth & 63).toString(16)}${realZ ? '' : '(off)'} cull ${cull} aref ${aref.toFixed(3)} bcol ${bcol.toString(16)} tex ${t0}${v0.serial === 0 && t0 ? '(white)' : ''},${t1},${t2},${t3} smp ${s0.toString(16)} koff ${koff} kb ${kb} poff ${poff} vr ${u32[w+D.vrFlags]} eye ${eyeOffset}`);
+    }
+    // Match the native cockpit compositor: original body/world first, then
+    // the authored local cabin, hands and screen with fresh cabin depth.
+    // Remote drivers retain world depth; a translucent display blends with
+    // the completed colour image and is still occluded by the local rim.
+    if(hudTouched)this.hudSeq=seq;
+    // Share the original road/traffic capture between both optical eyes.
+    if(rear && this.drivers?.mirrors){
+      const color=this.tex[rear.target],depth=this.zTex[rear.zid];
+      if(reuseRear){
+        this.drivers.mirrors.setSource(color!.tex,depth!);
+      }else if(color?.rt && !color.cube && !color.ms && depth && rearDrawn && color.w===depth.width && color.h===depth.height){
+        endPass();
+        this.drivers.mirrors.setSource(color.tex,depth);
+        this.rearCapture={seq,color:color.tex,depth};
+      }else {this.drivers.mirrors.setSource(null,null);this.rearCapture=null;}
+    }else {this.drivers?.mirrors?.setSource(null,null);this.rearCapture=null;}
+    if ((driverViews&1) && this.drivers?.localActive) {
+      endPass(); pass = openPass(0, 0);
+      if (pass) {
+        pass.setViewport(primaryViewport[0],primaryViewport[1],primaryViewport[2],primaryViewport[3],primaryViewport[4],primaryViewport[5]);
+        pass.setScissorRect(primaryScissor[0],primaryScissor[1],primaryScissor[2],primaryScissor[3]);
+        draws += this.drivers.draw(pass, this.u32.buffer, u32[fw + F.k], kn, eye, passMs ? 4 : 1, true, this.hudSeq===seq, driverScene);
+        draws += this.drivers.drawScreen(pass, eye, passMs ? 4 : 1);
+      }
     }
     endPass();
     if (tr) {
@@ -1145,23 +1362,34 @@ export class Encoder {
         clearValue: { r: ((c >>> 16) & 255) / 255, g: ((c >>> 8) & 255) / 255, b: (c & 255) / 255, a: 1 } }] }).end();
       passes++; if (this.msScreen) this.msScreen.stale = true;
     }
-    if (pslots) this.queue.writeBuffer(this.pBuf, 0, ps, 0, pslots * (PSLOT / 4));
+    if (pslots > uploadedSlots) this.queue.writeBuffer(this.pBuf, uploadedSlots * PSLOT, ps,
+      uploadedSlots * (PSLOT / 4), (pslots - uploadedSlots) * (PSLOT / 4));
+    if (eye) this.uploadedFrame = { seq, buffer: b, draws: dn, slots: pslots, scene: driverScene };
     this.totalDraws += draws; this.totalPasses += passes;
     return { draws, passes, skipped, encodeMs: performance.now() - t0, direct: isDirect };
   }
 
   /** StretchRect from a rectangle of `src` (r0 left | top << 16, r1 right | bottom << 16): the rectangle copied into
    *  a texture of its own, then drawn over the whole of `dst`; false when there is nothing to copy that way */
-  private blitRect(enc: GPUCommandEncoder, src: GPUTexture, r0: number, r1: number, dst: GPUTextureView, opaque: boolean): boolean {
-    const x0 = Math.min(r0 & 0xFFFF, src.width), y0 = Math.min(r0 >>> 16, src.height);
-    const x1 = Math.min(r1 & 0xFFFF, src.width), y1 = Math.min(r1 >>> 16, src.height);
+  private blitRect(enc: GPUCommandEncoder, src: GPUTexture, r0: number, r1: number, dst: GPUTextureView, opaque: boolean, scaleX=1, scaleY=1): boolean {
+    const x0 = Math.min(Math.round((r0 & 0xFFFF)*scaleX), src.width), y0 = Math.min(Math.round((r0 >>> 16)*scaleY), src.height);
+    const x1 = Math.min(Math.round((r1 & 0xFFFF)*scaleX), src.width), y1 = Math.min(Math.round((r1 >>> 16)*scaleY), src.height);
     if (x1 <= x0 || y1 <= y0 || src.format !== 'bgra8unorm') return false;
-    const part = this.device.createTexture({ label: `blit rect ${x1 - x0}x${y1 - y0}`, size: [x1 - x0, y1 - y0], format: 'bgra8unorm',
-      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
-    enc.copyTextureToTexture({ texture: src, origin: [x0, y0, 0] }, { texture: part }, [x1 - x0, y1 - y0, 1]);
+    const width=x1-x0,height=y1-y0,key=`${width}x${height}`;
+    let part=this.blitScratch.get(key);
+    if(!part){
+      const texture=this.device.createTexture({label:`blit rect ${key}`,size:[width,height],format:'bgra8unorm',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});
+      part={texture,view:texture.createView()};
+      // Reuse the post-processing crop targets, bounded to 64 MiB. GPU copies
+      // and draws are ordered, so a later crop can safely overwrite the scratch.
+      if(width*height*4<=16*1024*1024){
+        if(this.blitScratch.size>=4){const oldest=this.blitScratch.keys().next().value!;this.destroyLater.push(this.blitScratch.get(oldest)!.texture);this.blitScratch.delete(oldest);}
+        this.blitScratch.set(key,part);
+      }else this.destroyLater.push(texture);
+    }
+    enc.copyTextureToTexture({ texture: src, origin: [x0, y0, 0] }, { texture: part.texture }, [width,height,1]);
     this.calls.copy++;
-    this.copyQuad(enc, part.createView(), dst, 'bgra8unorm', this.linear, undefined, opaque);
-    this.destroyLater.push(part);
+    this.copyQuad(enc, part.view, dst, 'bgra8unorm', this.linear, undefined, opaque);
     return true;
   }
 
@@ -1185,7 +1413,7 @@ export class Encoder {
   }
 
   private texFor(id: number, cube: boolean, passTex: number): Tex {
-    const t = id ? this.tex[id] : undefined;
+    const t = id ? this.drawTexture(id) : undefined;
     if (!t || t.cube !== cube) return cube ? this.whiteCube : this.white;
     if (id === passTex) { this.conflicts++; return cube ? this.whiteCube : this.white; }
     if (this.over.size) { const o = this.over.get(id); if (o) { o.drawn = this.drawClock; return o; } }

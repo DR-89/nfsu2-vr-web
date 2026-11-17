@@ -562,6 +562,7 @@ dependencies = [
  "libc",
  "nfsu2-names",
  "nfsu2-util",
+ "nfsu2-vr",
  "nfsu2-ws",
  "parking_lot",
  "serde_json",
@@ -702,6 +703,14 @@ dependencies = [
  "parking_lot",
  "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "nfsu2-vr"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

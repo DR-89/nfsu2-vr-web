@@ -125,7 +125,7 @@ void sub_004ac9f0_orig(CPU *c){
     (void)c;
 }
 void sub_0072d18d_orig(CPU *c){
-    MRF32(MR32(c->esp + 16u)) = MRF32(MR32(c->esp + 4u) + 4u);
+    MRF32(MR32(c->esp + 16u)) = MR32(MR32(c->esp + 4u) + READER_SPEED) ? MRF32(MR32(c->esp + 4u) + 4u) : 0.f;
     c->eax = g.song_ends && MRF32(MR32(c->esp + 4u) + 4u) == 1.0f ? READER_ENDS : MR32(c->esp + 8u);
 }
 void guest_noyield(int d){ g.noyield += d; }

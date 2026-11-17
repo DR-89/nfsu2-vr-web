@@ -1,0 +1,68 @@
+import {N} from '../app/i18n';
+import {mirrorModels} from './mirror-profiles';
+
+export type VRControl = {t:'switch'} | {t:'seg'|'select';opts:[string,string][]} |
+  {t:'num';range:true;min:number;max:number;step:number;unit:string};
+export interface VRField {key:string;label:string;help:string;c:VRControl}
+/** Layer size is chosen when entering VR, outside the live headset menu. */
+export const vrLaunchFields:VRField[]=[
+    { key: 'vr_render_scale', label: N('Headset resolution'), help: N('Scales each eye’s width and height. 100% uses the headset’s recommended size. Lower values improve performance; higher values sharpen the image. Applies the next time you enter VR. Saved on this device.'), c: { t: 'select', opts: [['50','50%'],['75','75%'],['100','100%'],['125','125%'],['150','150%'],['200','200%']] } },
+];
+/** The website and headset use the same labels, choices and adjustment limits. */
+export const vrFields:VRField[]=[
+    { key: 'vr_cockpit', label: N('Cockpit view on monitor'), help: '', c: { t: 'switch' } },
+    { key: 'vr_hand_controls', label: N('Drive with VR controllers'), help: N('Grip the wheel to steer. Right trigger: gas. Left trigger: brake. Off: use your keyboard, controller or steering wheel. Right stick: up enters an event or shop, down opens career status, left opens messages, right enters an event or shop. Return to center before repeating. X/Y: shift gears.'), c: { t: 'switch' } },
+    { key: 'vr_wheel_grip', label: N('Require grip for steering'), help: N('Off: hold your hands near the wheel to steer; move them away to release. On: hold the grip button.'), c: { t: 'switch' } },
+    { key: 'vr_wheel_rotation', label: N('Wheel rotation'), help: '', c: { t: 'num', range: true, min: 180, max: 1080, step: 30, unit: '°' } },
+    { key: 'vr_steering_sensitivity', label: N('Steering sensitivity'), help: '', c: { t: 'num', range: true, min: 50, max: 300, step: 5, unit: '%' } },
+    { key: 'vr_steering_deadzone', label: N('Steering dead zone'), help: '', c: { t: 'num', range: true, min: 0, max: 50, step: 1, unit: '%' } },
+    { key: 'vr_wheel_return', label: N('Wheel return speed'), help: '', c: { t: 'num', range: true, min: 0, max: 540, step: 30, unit: '°/s' } },
+    { key: 'vr_shifter_mode', label: N('Shifter mode'), help: N('Select manual transmission in the game to use the shifter and gestures.'), c: { t: 'seg', opts: [['0',N('H-pattern')],['1',N('I-pattern (sequential)')]] } },
+    { key: 'vr_shift_guide', label: N('Shifter guide'), help: '', c: { t: 'select', opts: [['0',N('Off')],['1',N('Always')],['2',N('Near shifter')]] } },
+    { key: 'vr_shift_reverse', label: N('Push forward to upshift'), help: N('Off: pull back to upshift. Applies to the sequential lever.'), c: { t: 'switch' } },
+    { key: 'vr_shift_travel', label: N('Lever travel'), help: '', c: { t: 'num', range: true, min: 20, max: 100, step: 5, unit: 'mm' } },
+    { key: 'vr_shift_gestures', label: N('No-grip shifting'), help: '', c: { t: 'select', opts: [['0',N('Off')],['1',N('Single flick')],['2',N('Double flick to downshift')]] } },
+    { key: 'vr_gesture_reverse', label: N('Forward / down to upshift'), help: N('Off: back / up to upshift. No grip is needed inside the shifter zone.'), c: { t: 'switch' } },
+    { key: 'vr_gesture_axis', label: N('Flick axis'), help: '', c: { t: 'seg', opts: [['0',N('Forward / back')],['1',N('Up / down')]] } },
+    { key: 'vr_shift_zone', label: N('Active zone radius'), help: '', c: { t: 'num', range: true, min: 10, max: 30, step: 1, unit: 'cm' } },
+    { key: 'vr_gesture_travel', label: N('Flick travel deadzone'), help: '', c: { t: 'num', range: true, min: 20, max: 120, step: 5, unit: 'mm' } },
+    { key: 'vr_gesture_angle', label: N('Wrist angle deadzone'), help: '', c: { t: 'num', range: true, min: 10, max: 60, step: 5, unit: '°' } },
+    { key: 'vr_gesture_speed', label: N('Flick speed'), help: '', c: { t: 'num', range: true, min: 10, max: 150, step: 5, unit: 'cm/s' } },
+    { key: 'vr_leds', label: N('LED strips'), help: '', c: { t: 'switch' } },
+    { key: 'vr_led_pulse', label: N('Pulse to music'), help: '', c: { t: 'switch' } },
+    { key: 'vr_shift_lights', label: N('Shift light cues'), help: '', c: { t: 'switch' } },
+    { key: 'vr_haptics', label: N('VR vibration'), help: '', c: { t: 'switch' } },
+    { key: 'vr_engine_rumble', label: N('Engine vibration'), help: '', c: { t: 'switch' } },
+    { key: 'vr_grip_feedback', label: N('Engine feedback near controls'), help: N('Engine vibration only while holding the wheel or near the shifter. Road and collision feedback still reach both hands.'), c: { t: 'switch' } },
+    { key: 'vr_shift_click', label: N('Shift vibration click'), help: '', c: { t: 'switch' } },
+    { key: 'vr_shift_sound', label: N('Shift sound'), help: '', c: { t: 'switch' } },
+    { key: 'vr_screen_movable', label: N('Grab dashboard screen'), help: '', c: { t: 'switch' } },
+    { key: 'vr_led_color', label: N('LED colour'), help: '', c: { t: 'select', opts: [['0',N('Cyan')],['1',N('Blue')],['2',N('Violet')],['3',N('Pink')],['4',N('Red')],['5',N('Amber')],['6',N('Green')],['7',N('White')]] } },
+    { key: 'vr_screen_page', label: N('Dashboard page'), help: N('Use the right button below the screen to switch pages in the cockpit.'), c: { t: 'seg', opts: [['0',N('Music & videos')],['1',N('Telemetry')]] } },
+    { key: 'vr_screen_size', label: N('Screen size'), help: '', c: { t: 'num', range: true, min: 50, max: 300, step: 1, unit: '%' } },
+    { key: 'vr_screen_x', label: N('Screen left / right'), help: '', c: { t: 'num', range: true, min: -200, max: 200, step: 1, unit: 'cm' } },
+    { key: 'vr_screen_y', label: N('Screen up / down'), help: '', c: { t: 'num', range: true, min: -200, max: 200, step: 1, unit: 'cm' } },
+    { key: 'vr_screen_z', label: N('Screen forward / back'), help: '', c: { t: 'num', range: true, min: -200, max: 200, step: 1, unit: 'cm' } },
+    { key: 'vr_screen_pitch', label: N('Screen tilt'), help: '', c: { t: 'num', range: true, min: -60, max: 60, step: 1, unit: '°' } },
+    { key: 'vr_screen_yaw', label: N('Screen turn'), help: '', c: { t: 'num', range: true, min: -60, max: 60, step: 1, unit: '°' } },
+    { key: 'vr_map_x', label: N('Minimap left / right'), help: N('Grip the minimap to move it. Press X or A with your hand over it to open the world map.'), c: { t: 'num', range: true, min: -200, max: 200, step: 1, unit: 'cm' } },
+    { key: 'vr_map_y', label: N('Minimap up / down'), help: '', c: { t: 'num', range: true, min: -200, max: 200, step: 1, unit: 'cm' } },
+    { key: 'vr_map_z', label: N('Minimap forward / back'), help: '', c: { t: 'num', range: true, min: -200, max: 200, step: 1, unit: 'cm' } },
+    { key: 'vr_map_pitch', label: N('Minimap tilt'), help: '', c: { t: 'num', range: true, min: -45, max: 45, step: 1, unit: '°' } },
+    { key: 'vr_map_yaw', label: N('Minimap turn'), help: '', c: { t: 'num', range: true, min: -45, max: 45, step: 1, unit: '°' } },
+    { key: 'vr_mirror_resolution', label: N('Mirror resolution'), help: '', c: { t: 'select', opts: [['256','256'],['512','512'],['1024','1024'],['2048','2048'],['4096','4096']] } },
+    { key: 'vr_mirror_vehicle', label: N('Mirrors for car'), help: N('Each car remembers its own mirror angles. Choose a car to adjust or reset them.'), c: { t: 'select', opts: mirrorModels.map(m=>[m,m==='DEFAULT'?N('Default for new cars'):m]) } },
+    { key: 'vr_mirror_inside_yaw', label: N('Inside mirror turn'), help: N('Grip a mirror and turn your wrist or push its edge to adjust the view.'), c: { t: 'num', range: true, min: -10.3, max: 10.3, step: .1, unit: '°' } },
+    { key: 'vr_mirror_inside_pitch', label: N('Inside mirror tilt'), help: '', c: { t: 'num', range: true, min: -6, max: 6, step: .1, unit: '°' } },
+    { key: 'vr_mirror_outside_yaw', label: N('Outside mirrors turn'), help: N('Both outside mirrors adjust together.'), c: { t: 'num', range: true, min: -10.3, max: 10.3, step: .1, unit: '°' } },
+    { key: 'vr_mirror_outside_pitch', label: N('Outside mirrors tilt'), help: '', c: { t: 'num', range: true, min: -6, max: 6, step: .1, unit: '°' } },
+    { key: 'vr_avatars', label: N("Other players' interiors"), help: '', c: { t: 'switch' } },
+    { key: 'vr_share_pose', label: N('Share head and hands'), help: '', c: { t: 'switch' } },
+    { key: 'vr_world_scale', label: N('World scale'), help: '', c: { t: 'num', range: true, min: 50, max: 150, step: 1, unit: '%' } },
+    { key: 'vr_seat_height', label: N('Seat height'), help: '', c: { t: 'num', range: true, min: -35, max: 35, step: 1, unit: 'cm' } },
+    { key: 'vr_seat_forward', label: N('Seat forward'), help: '', c: { t: 'num', range: true, min: -40, max: 40, step: 1, unit: 'cm' } },
+    { key: 'vr_media_volume', label: N('Media volume'), help: '', c: { t: 'num', range: true, min: 0, max: 100, step: 1, unit: '%' } },
+    { key: 'vr_music_source', label: N('Music source'), help: N('Auto: custom tracks while driving and in replays, EA TRAX in menus. Custom only: quiet menus when custom tracks are available.'), c: { t: 'select', opts: [['0',N('Auto')],['1',N('Custom only')],['2',N('EA TRAX only')]] } },
+    { key: 'vr_master_gain', label: N('Master sound gain'), help: N('Adjust all game sound and local music or videos together.'), c: { t: 'num', range: true, min: -12, max: 12, step: 1, unit: 'dB' } },
+    { key: 'vr_media_opacity', label: N('Screen opacity'), help: '', c: { t: 'num', range: true, min: 10, max: 100, step: 1, unit: '%' } },
+];

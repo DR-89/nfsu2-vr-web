@@ -21,6 +21,8 @@ import { groupsOk, phrasesOk } from './phrases';
 import { flagCode } from './flags';
 import { plateUpper, plateValid } from './plates';
 import { fill, LANGUAGES, N, type Vars } from './i18n';
+import { mirrorModels,mirrorFields,mirrorKey } from '../vr/mirror-profiles';
+import {stanceModels,stanceModelsValue} from '../vr/stance-models';
 export { LANGUAGES };
 
 /** bundle.m's K_* kinds, and the browser's own crews (a list of names: crews.ts), blocked players (names: a list of
@@ -30,13 +32,13 @@ export { LANGUAGES };
  *  letters as capitals, none that reads as a slur. */
 export type Kind = 'raw' | 'bool' | 'boolInv' | 'enum' | 'num' | 'id' | 'token' | 'int' | 'name' | 'peers'
   | 'path' | 'text' | 'room' | 'wxh' | 'fixes' | 'ifname' | 'ipv4' | 'mac' | 'host' | 'parts' | 'dump' | 'crews' | 'rgbs'
-  | 'phrases' | 'sayGroups' | 'names' | 'key' | 'flag' | 'plate';
+  | 'phrases' | 'sayGroups' | 'names' | 'key' | 'flag' | 'plate' | 'stanceModels';
 
 export interface KeyDef {
   key: string;
   env: string;
   kind: Kind;
-  /** enum: '|'-separated values ("#" = any number, "scale:#" = prefix + number); int: "lo..hi" */
+  /** enum: '|'-separated values ("#" = any number, "scale:#" = prefix + number); int/num: "lo..hi" */
   vals?: string;
   ic?: boolean;
   /** 'mac': only the Mac app uses it (a Mac settings.ini restored into the browser keeps working;
@@ -67,6 +69,68 @@ export const HORNS = ['dual', 'single', 'truck', 'train', 'klaxon', 'cucaracha',
   'sputter', 'thecar', 'thecar_long'] as const;
 
 export const KEYS: readonly KeyDef[] = [
+  {key:'stance_models',env:'NFSU2_STANCE_MODELS',kind:'stanceModels',scope:'web'},
+  { key: 'vr_render_scale', env: 'NFSU2_VR_RENDER_SCALE', kind: 'enum', vals: '50|75|100|125|150|200', scope: 'web', device: true },
+  // VR preferences belong to the player and travel with cloud saves.
+  { key: 'vr_avatars', env: 'NFSU2_VR_AVATARS', kind: 'bool', scope: 'web' },
+  { key: 'vr_share_pose', env: 'NFSU2_VR_SHARE_POSE', kind: 'bool', scope: 'web' },
+  { key: 'vr_world_scale', env: 'NFSU2_VR_WORLD_SCALE', kind: 'int', vals: '50..150', scope: 'web' },
+  { key: 'vr_seat_height', env: 'NFSU2_VR_SEAT_HEIGHT', kind: 'int', vals: '-35..35', scope: 'web' },
+  { key: 'vr_seat_forward', env: 'NFSU2_VR_SEAT_FORWARD', kind: 'int', vals: '-40..40', scope: 'web' },
+  { key: 'vr_media_volume', env: 'NFSU2_VR_MEDIA_VOLUME', kind: 'int', vals: '0..100', scope: 'web' },
+  { key: 'vr_master_gain', env: 'NFSU2_VR_MASTER_GAIN', kind: 'int', vals: '-12..12', scope: 'web' },
+  { key: 'vr_music_source', env: 'NFSU2_VR_MUSIC_SOURCE', kind: 'int', vals: '0..2', scope: 'web' },
+  { key: 'vr_media_opacity', env: 'NFSU2_VR_MEDIA_OPACITY', kind: 'int', vals: '10..100', scope: 'web' },
+  { key: 'vr_cockpit', env: 'NFSU2_VR_COCKPIT', kind: 'bool', scope: 'web' },
+  { key: 'vr_leds', env: 'NFSU2_VR_LEDS', kind: 'bool', scope: 'web' },
+  { key: 'vr_led_color', env: 'NFSU2_VR_LED_COLOR', kind: 'int', vals: '0..7', scope: 'web' },
+  { key: 'vr_led_pulse', env: 'NFSU2_VR_LED_PULSE', kind: 'bool', scope: 'web' },
+  { key: 'vr_shift_lights', env: 'NFSU2_VR_SHIFT_LIGHTS', kind: 'bool', scope: 'web' },
+  { key: 'vr_haptics', env: 'NFSU2_VR_HAPTICS', kind: 'bool', scope: 'web' },
+  { key: 'vr_engine_rumble', env: 'NFSU2_VR_ENGINE_RUMBLE', kind: 'bool', scope: 'web' },
+  { key: 'vr_grip_feedback', env: 'NFSU2_VR_GRIP_FEEDBACK', kind: 'bool', scope: 'web' },
+  { key: 'vr_shift_click', env: 'NFSU2_VR_SHIFT_CLICK', kind: 'bool', scope: 'web' },
+  { key: 'vr_shift_sound', env: 'NFSU2_VR_SHIFT_SOUND', kind: 'bool', scope: 'web' },
+  { key: 'vr_hand_controls', env: 'NFSU2_VR_HAND_CONTROLS', kind: 'bool', scope: 'web' },
+  { key: 'vr_wheel_grip', env: 'NFSU2_VR_WHEEL_GRIP', kind: 'bool', scope: 'web' },
+  { key: 'vr_wheel_rotation', env: 'NFSU2_VR_WHEEL_ROTATION', kind: 'int', vals: '180..1080', scope: 'web' },
+  { key: 'vr_steering_sensitivity', env: 'NFSU2_VR_STEERING_SENSITIVITY', kind: 'int', vals: '50..300', scope: 'web' },
+  { key: 'vr_steering_deadzone', env: 'NFSU2_VR_STEERING_DEADZONE', kind: 'int', vals: '0..50', scope: 'web' },
+  { key: 'vr_wheel_return', env: 'NFSU2_VR_WHEEL_RETURN', kind: 'int', vals: '0..540', scope: 'web' },
+  { key: 'vr_shifter_mode', env: 'NFSU2_VR_SHIFTER_MODE', kind: 'int', vals: '0..1', scope: 'web' },
+  { key: 'vr_shift_guide', env: 'NFSU2_VR_SHIFT_GUIDE', kind: 'int', vals: '0..2', scope: 'web' },
+  { key: 'vr_shift_reverse', env: 'NFSU2_VR_SHIFT_REVERSE', kind: 'bool', scope: 'web' },
+  { key: 'vr_shift_travel', env: 'NFSU2_VR_SHIFT_TRAVEL', kind: 'int', vals: '20..100', scope: 'web' },
+  { key: 'vr_shift_gestures', env: 'NFSU2_VR_SHIFT_GESTURES', kind: 'int', vals: '0..2', scope: 'web' },
+  { key: 'vr_gesture_reverse', env: 'NFSU2_VR_GESTURE_REVERSE', kind: 'bool', scope: 'web' },
+  { key: 'vr_gesture_axis', env: 'NFSU2_VR_GESTURE_AXIS', kind: 'int', vals: '0..1', scope: 'web' },
+  { key: 'vr_shift_zone', env: 'NFSU2_VR_SHIFT_ZONE', kind: 'int', vals: '10..30', scope: 'web' },
+  { key: 'vr_gesture_travel', env: 'NFSU2_VR_GESTURE_TRAVEL', kind: 'int', vals: '20..120', scope: 'web' },
+  { key: 'vr_gesture_angle', env: 'NFSU2_VR_GESTURE_ANGLE', kind: 'int', vals: '10..60', scope: 'web' },
+  { key: 'vr_gesture_speed', env: 'NFSU2_VR_GESTURE_SPEED', kind: 'int', vals: '10..150', scope: 'web' },
+  { key: 'vr_screen_page', env: 'NFSU2_VR_SCREEN_PAGE', kind: 'int', vals: '0..1', scope: 'web' },
+  { key: 'vr_screen_movable', env: 'NFSU2_VR_SCREEN_MOVABLE', kind: 'bool', scope: 'web' },
+  { key: 'vr_screen_size', env: 'NFSU2_VR_SCREEN_SIZE', kind: 'int', vals: '50..300', scope: 'web' },
+  { key: 'vr_screen_x', env: 'NFSU2_VR_SCREEN_X', kind: 'int', vals: '-200..200', scope: 'web' },
+  { key: 'vr_screen_y', env: 'NFSU2_VR_SCREEN_Y', kind: 'int', vals: '-200..200', scope: 'web' },
+  { key: 'vr_screen_z', env: 'NFSU2_VR_SCREEN_Z', kind: 'int', vals: '-200..200', scope: 'web' },
+  { key: 'vr_screen_pitch', env: 'NFSU2_VR_SCREEN_PITCH', kind: 'int', vals: '-60..60', scope: 'web' },
+  { key: 'vr_screen_yaw', env: 'NFSU2_VR_SCREEN_YAW', kind: 'int', vals: '-60..60', scope: 'web' },
+  { key: 'vr_map_x', env: 'NFSU2_VR_MAP_X', kind: 'int', vals: '-200..200', scope: 'web' },
+  { key: 'vr_map_y', env: 'NFSU2_VR_MAP_Y', kind: 'int', vals: '-200..200', scope: 'web' },
+  { key: 'vr_map_z', env: 'NFSU2_VR_MAP_Z', kind: 'int', vals: '-200..200', scope: 'web' },
+  { key: 'vr_map_pitch', env: 'NFSU2_VR_MAP_PITCH', kind: 'int', vals: '-45..45', scope: 'web' },
+  { key: 'vr_map_yaw', env: 'NFSU2_VR_MAP_YAW', kind: 'int', vals: '-45..45', scope: 'web' },
+  { key: 'vr_mirror_resolution', env: 'NFSU2_VR_MIRROR_RESOLUTION', kind: 'enum', vals: '256|512|1024|2048|4096', scope: 'web' },
+  { key: 'vr_mirror_inside_yaw', env: 'NFSU2_VR_MIRROR_INSIDE_YAW', kind: 'num', vals: '-10.31325..10.31325', scope: 'web' },
+  { key: 'vr_mirror_inside_pitch', env: 'NFSU2_VR_MIRROR_INSIDE_PITCH', kind: 'num', vals: '-6.01606..6.01606', scope: 'web' },
+  { key: 'vr_mirror_outside_yaw', env: 'NFSU2_VR_MIRROR_OUTSIDE_YAW', kind: 'num', vals: '-10.31325..10.31325', scope: 'web' },
+  { key: 'vr_mirror_outside_pitch', env: 'NFSU2_VR_MIRROR_OUTSIDE_PITCH', kind: 'num', vals: '-6.01606..6.01606', scope: 'web' },
+  { key: 'vr_mirror_vehicle', env: 'NFSU2_VR_MIRROR_VEHICLE', kind: 'enum', vals: mirrorModels.join('|'), scope: 'web' },
+  ...mirrorModels.filter(m=>m!=='DEFAULT').flatMap(model=>mirrorFields.map(field=>({
+    key:mirrorKey(model,field),env:'NFSU2_'+mirrorKey(model,field).toUpperCase(),kind:'num' as const,
+    vals:field.endsWith('yaw')?'-10.31325..10.31325':'-6.01606..6.01606',scope:'web' as const
+  }))),
   // app
   { key: 'game_folder', env: 'NFSU2_DATA', kind: 'path', scope: 'mac' },
   { key: 'movies', env: 'NOMOVIES', kind: 'boolInv', scope: 'web' },
@@ -87,6 +151,7 @@ export const KEYS: readonly KeyDef[] = [
   { key: 'movie_framing', env: 'NFSU2_MOVIE', kind: 'enum', vals: 'fit|fill|stretch', scope: 'web' },
   { key: 'cutscene_borders', env: 'NFSU2_CUTSCENE_BORDERS', kind: 'enum', vals: 'full|off', scope: 'web' },
   { key: 'fov_scale', env: 'NFSU2_FOV_SCALE', kind: 'enum', vals: 'original|correct', scope: 'web' },
+  { key: 'player_headlights', env: 'NFSU2_PLAYER_HEADLIGHTS', kind: 'enum', vals: 'original|off|high', scope: 'web' },
   { key: 'other_headlights', env: 'NFSU2_HEADLIGHTS', kind: 'enum', vals: 'players|all|off', scope: 'web' },
   // graphics options and frame-rate counter
   { key: 'graphics', env: 'NFSU2_GRAPHICS', kind: 'enum', vals: 'original|enhanced|custom', scope: 'mac' },
@@ -129,7 +194,7 @@ export const KEYS: readonly KeyDef[] = [
   // and each one's colour, in the same order (crews.ts): bundle.m's K_RGBS
   { key: 'roam_crew_colours', env: 'NFSU2_ROAM_CREW_RGB', kind: 'rgbs', ic: true, scope: 'web' },
   { key: 'roam_max_players', env: 'NFSU2_ROAM_MAX_PLAYERS', kind: 'int', vals: '2..65', ic: true, scope: 'web' },
-  { key: 'roam_max_cars', env: 'NFSU2_ROAM_MAX_CARS', kind: 'int', vals: 'auto|0..64', ic: true, scope: 'web', device: true },
+  { key: 'roam_max_cars', env: 'NFSU2_ROAM_MAX_CARS', kind: 'int', vals: 'auto|0..64', ic: true, scope: 'web' },
   // on, off (Ghost mode for players' cars), none (for traffic and tuners too); a module before none took it for on
   { key: 'roam_collide', env: 'NFSU2_ROAM_COLLIDE', kind: 'enum', vals: 'on|off|none', ic: true, scope: 'web' },
   // quick chat's fixed phrases (web/src/app/quickchat.ts, runtime/roam_game.c say_*): the page has the picker, so not in
@@ -180,7 +245,7 @@ export const KEYS: readonly KeyDef[] = [
   // fetches ahead only those picked: datacache.ts).  uhud also turns on the maps' pack (resolveEnv: NFSU2_MAP_TEXTURES);
   // map turns on only that one (uiPack: no pack of the menus' and HUD's).  Not in bundle.m's table: the Mac's packs
   // are "textures"
-  { key: 'ui_textures', env: 'NFSU2_UI_TEXTURES', kind: 'enum', vals: 'original|map|uhud', scope: 'web', device: true },
+  { key: 'ui_textures', env: 'NFSU2_UI_TEXTURES', kind: 'enum', vals: 'original|map|hud|uhud', scope: 'web' },
   // the players this one blocks in free roam, by name (the page's hello to the server: net/index.ts).  Not in bundle.m's
   // table: the Mac's free roam has no hub
   { key: 'roam_block', env: 'NFSU2_ROAM_BLOCK', kind: 'names', ic: true, scope: 'web' },
@@ -223,6 +288,9 @@ export const KEYS: readonly KeyDef[] = [
   // computers (device.ts deviceDefaults), the runtime's own default off.  Not in
   // bundle.m's table: there a lower-case key, so it reaches the runtime as NFSU2_HQ_VINYLS all the same
   { key: 'hq_vinyls', env: 'NFSU2_HQ_VINYLS', kind: 'bool', scope: 'web' },
+  // Optional regional selections and the hidden vinyl category (runtime/regional.c, runtime/vinylcat.c).
+  { key: 'regional_cars', env: 'NFSU2_REGIONAL_CARS', kind: 'bool', scope: 'web' },
+  { key: 'special_vinyls', env: 'NFSU2_SPECIAL_VINYLS', kind: 'bool', scope: 'web' },
   // the game's own textures without smoothing (only the page's renderer reads it: subsystems.ts, gpu/encoder.ts
   // pointTex).  Not in bundle.m's table
   { key: 'pixelated_textures', env: 'NFSU2_PIXELATED_TEXTURES', kind: 'bool', scope: 'web' },
@@ -323,7 +391,7 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # where the server has them.  Its key (key_song, F7) plays the next song
 # while you play.
 # [NFSU2_SONGS]
-#songs = uncensored
+#songs = original
 
 # Music in drag and drift races: on = the EA Trax songs (or the Radio's
 # tracks) play there too, as in the other races, at the game's music volume;
@@ -381,6 +449,9 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # [NFSU2_STANCE]
 #stance = off
 
+# Model defaults set by the VR Stance editor; garage entries stay in MODPARTS.DAT.
+#stance_models = v1
+
 # Other players' cars: shown = with the looks they chose with the mods
 # (their stance), as they see them; original = as the original game draws
 # them.  Your own car keeps its own either way.  [NFSU2_OTHERS_MOD_PARTS]
@@ -410,6 +481,13 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # pictures download as it is seen, about 100 KB.  off = the original game.
 # [NFSU2_HQ_VINYLS]
 #hq_vinyls = on
+
+# Both regional car selections, only when both releases' PC files exist.
+# Takes effect at the next start. [NFSU2_REGIONAL_CARS]
+#regional_cars = off
+# Offer the hidden Special category on opening the vinyl shop. Installed
+# vinyls remain on cars when disabled. [NFSU2_SPECIAL_VINYLS]
+#special_vinyls = off
 
 # What the game does while this tab is hidden or another window is active:
 # "pause" freezes it and pauses its sound, like alt-tab on Windows; "run"
@@ -476,10 +554,15 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # original game.  [NFSU2_HEADLIGHTS]
 #other_headlights = players
 
+# Your headlights: original, off or high beam. Also adjustable while playing.
+# [NFSU2_PLAYER_HEADLIGHTS]
+#player_headlights = original
+
 # The menus', the HUD's and the maps' textures: original = the game's; map =
 # JeansBig's Detailed Map (nfsmods.xyz/mod/4485): the minimap's and the
 # world map's maps redrawn at 2048x2048 with the missing shortcuts, the
-# menus and the HUD the game's; uhud = the Detailed Map and LunicAura106's
+# menus and the HUD the game's; hud = only LunicAura106's Upscaled HUD;
+# uhud = the Detailed Map and LunicAura106's
 # Upscaled HUD (nfsmods.xyz/mod/4319): the menus, the race HUD, the fonts
 # and the car and brand logos redrawn at four times their size; where this
 # server has the mods' texture packs (a language pack's own fonts stay; most
@@ -503,7 +586,8 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # ---- Frame rate ----------------------------------------------------------
 
 # auto = follow the display's refresh rate (60, 120 or 240; 144/165 Hz give
-# 120); 30, 60, 120 or 240 = fixed (30: steady frames where 60 does not
+# 120; VR also follows 72, 80 and 90 Hz); 30, 60, 120 or 240 = fixed
+# (30: steady frames where 60 does not
 # hold, as on a slow phone); uncapped = no pacing (benchmark only);
 # off = the game's own 1/120 s limiter, the timing before the frame-rate
 # work.  Cutscenes stay at 30 fps in every mode.  [NFSU2_FPS]
@@ -648,6 +732,10 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 # Any other name: a world of your own (capitals and spaces do not count).  Not
 # private: everyone on the server still sees your name.  [NFSU2_ROAM_ROOM]
 #roam_room =
+# CopChase network prototype: opt into shared pursuit snapshots. Vehicle
+# spawning, rendering and gameplay are still being ported; this switch alone
+# does not add police to the game. Off by default.
+#NFSU2_COPCHASE = 0
 # Players you block, by the name over their car, separated by commas (up to
 # 32): you and they never see each other in free roam (capitals do not
 # count).  The server's operator sees who blocks whom.  [NFSU2_ROAM_BLOCK]
@@ -711,6 +799,162 @@ export const TEMPLATE = `# NFSU2 settings, read at every launch.
 #roam_rate = 20
 #roam_delay = 100
 #roam_extrap = 250
+# VR and media (cloud profile preferences; read on each launch).
+# Headset render width/height as a percentage of the recommended eye size.
+# 50, 75, 100 (default), 125, 150 or 200. Device-local; applies on entering VR.
+# [NFSU2_VR_RENDER_SCALE]
+#vr_render_scale = 100
+# [NFSU2_VR_AVATARS]
+#vr_avatars = on
+# [NFSU2_VR_SHARE_POSE]
+#vr_share_pose = on
+# [NFSU2_VR_WORLD_SCALE]
+#vr_world_scale = 100
+# [NFSU2_VR_SEAT_HEIGHT]
+#vr_seat_height = 0
+# [NFSU2_VR_SEAT_FORWARD]
+#vr_seat_forward = 0
+# [NFSU2_VR_MEDIA_VOLUME]
+#vr_media_volume = 70
+# Overall sound trim in decibels, including local music and videos.
+# [NFSU2_VR_MASTER_GAIN]
+#vr_master_gain = 0
+# 0 = custom music in driving/replays and EA TRAX in menus;
+# 1 = custom music, quiet menus when a custom library is available; 2 = EA TRAX.
+# [NFSU2_VR_MUSIC_SOURCE]
+#vr_music_source = 0
+# [NFSU2_VR_MEDIA_OPACITY]
+#vr_media_opacity = 100
+
+# [NFSU2_VR_COCKPIT]
+#vr_cockpit = off
+
+# [NFSU2_VR_LEDS]
+#vr_leds = on
+
+# [NFSU2_VR_LED_COLOR]
+#vr_led_color = 0
+
+# [NFSU2_VR_LED_PULSE]
+#vr_led_pulse = on
+
+# [NFSU2_VR_SHIFT_LIGHTS]
+#vr_shift_lights = off
+
+# [NFSU2_VR_HAPTICS]
+#vr_haptics = on
+
+# Engine vibration follows RPM/load and mixes with road/collision feedback on
+# both hands, including stick steering. Optional grip feedback limits only the
+# engine to hands at the wheel or in the shifter zone.
+# [NFSU2_VR_ENGINE_RUMBLE]
+#vr_engine_rumble = on
+# [NFSU2_VR_GRIP_FEEDBACK]
+#vr_grip_feedback = off
+
+# Confirmed gear engagement: separate vibration and optional native sound cue.
+# [NFSU2_VR_SHIFT_CLICK]
+#vr_shift_click = on
+# [NFSU2_VR_SHIFT_SOUND]
+#vr_shift_sound = off
+
+# Drive with VR controllers: hands near the rim; right trigger gas, left trigger brake.
+# [NFSU2_VR_HAND_CONTROLS]
+#vr_hand_controls = on
+
+# Off: hands attach near the rim and release when moved away. On: hold the grip button.
+# [NFSU2_VR_WHEEL_GRIP]
+#vr_wheel_grip = off
+
+# Physical wheel rotation, lock to lock, in degrees.
+# [NFSU2_VR_WHEEL_ROTATION]
+#vr_wheel_rotation = 360
+
+# Steering gain and centre dead zone, in percent.
+# [NFSU2_VR_STEERING_SENSITIVITY]
+#vr_steering_sensitivity = 100
+# [NFSU2_VR_STEERING_DEADZONE]
+#vr_steering_deadzone = 0
+
+# Return after releasing both hands, degrees per second; 0 holds its angle.
+# [NFSU2_VR_WHEEL_RETURN]
+#vr_wheel_return = 240
+
+# Physical shifter (manual transmission): 0 H-pattern, 1 sequential I-pattern.
+# [NFSU2_VR_SHIFTER_MODE]
+#vr_shifter_mode = 0
+# Gate guide: 0 off, 1 always, 2 near the lever.
+# [NFSU2_VR_SHIFT_GUIDE]
+#vr_shift_guide = 1
+# Sequential: off pulls back to upshift; on pushes forward to upshift.
+# [NFSU2_VR_SHIFT_REVERSE]
+#vr_shift_reverse = off
+# Lever travel from centre, millimetres.
+# [NFSU2_VR_SHIFT_TRAVEL]
+#vr_shift_travel = 45
+# No-grip gestures: 0 off, 1 single strokes, 2 double stroke to downshift.
+# [NFSU2_VR_SHIFT_GESTURES]
+#vr_shift_gestures = 0
+# Gesture upshift: off back/up, on forward/down; axis 0 forward/back, 1 up/down.
+# [NFSU2_VR_GESTURE_REVERSE]
+#vr_gesture_reverse = on
+# [NFSU2_VR_GESTURE_AXIS]
+#vr_gesture_axis = 0
+# Active-zone radius in cm, flick travel in mm, wrist angle in degrees, speed in cm/s.
+# [NFSU2_VR_SHIFT_ZONE]
+#vr_shift_zone = 10
+# [NFSU2_VR_GESTURE_TRAVEL]
+#vr_gesture_travel = 45
+# [NFSU2_VR_GESTURE_ANGLE]
+#vr_gesture_angle = 20
+# [NFSU2_VR_GESTURE_SPEED]
+#vr_gesture_speed = 35
+
+# [NFSU2_VR_SCREEN_PAGE]
+#vr_screen_page = 0
+
+# [NFSU2_VR_SCREEN_MOVABLE]
+#vr_screen_movable = off
+
+# [NFSU2_VR_SCREEN_SIZE]
+#vr_screen_size = 100
+
+# [NFSU2_VR_SCREEN_X]
+#vr_screen_x = 0
+
+# [NFSU2_VR_SCREEN_Y]
+#vr_screen_y = 0
+
+# [NFSU2_VR_SCREEN_Z]
+#vr_screen_z = 0
+
+# [NFSU2_VR_SCREEN_PITCH]
+#vr_screen_pitch = 0
+
+# [NFSU2_VR_SCREEN_YAW]
+#vr_screen_yaw = 0
+
+# Minimap placement in the cockpit: centimetres from its console mount, then
+# pitch/yaw in degrees. Grip the disc to move it; X/A over it opens the map.
+#vr_map_x = 0
+#vr_map_y = 0
+#vr_map_z = 0
+#vr_map_pitch = 0
+#vr_map_yaw = 0
+
+# Mirror capture width; 256, 512, 1024, 2048 or 4096 pixels.
+#vr_mirror_resolution = 1024
+# Mirror angles in degrees. Grip a mirror to adjust it in the cockpit.
+# The two outside mirrors share a setting, with opposite horizontal angles.
+#vr_mirror_inside_yaw = 0
+#vr_mirror_inside_pitch = 0
+#vr_mirror_outside_yaw = 0
+#vr_mirror_outside_pitch = 0
+# Model selected in the website editor. Blank per-car angles use the defaults
+# above. A cockpit grip saves all four angles for that car independently.
+#vr_mirror_vehicle = DEFAULT
+${mirrorModels.filter(m=>m!=='DEFAULT').flatMap(m=>mirrorFields.map(f=>'#'+mirrorKey(m,f)+' =')).join('\n')}
+
 `;
 
 /** The template's default for a key ("#key = value"), '' if the template leaves it empty or does not list it. */
@@ -732,6 +976,8 @@ export const DEFAULTS: ReadonlyMap<string, string> = (() => {
 export const APP_DEFAULTS: Readonly<Record<string, string>> = {
   ALARM: '0', FIXMAT: '0', FIXMAT_MODE: '3', NOMOVIES: '0', SNDSYNC: '0', GPUVS: '1',
   NFSU2_READONLY_DATA: '1',
+  // Native mod default: the retail playlist unless the player chooses the restored pack.
+  NFSU2_SONGS: 'original',
   // the browser's: play in the window unless settings.ini asks for full screen
   NFSFULL: '0',
   // no Discord in a browser (null stand-ins), said once so the log is explicit
@@ -954,6 +1200,11 @@ export function checkSetting(key: string, val: string): Checked | Refused | null
   if (!val) return null;
   let out = val;
   switch (kind) {
+    case 'stanceModels': {
+      const models=stanceModels(val);
+      if(!models)return refuse(N('"{value}" is not {kind}'),val,{kind:'v1|MODEL:front,rear,offset,offset,width'});
+      out=stanceModelsValue(models);break;
+    }
     case 'bool': case 'boolInv': {
       const t = truthy(val), f = falsy(val);
       if (!t && !f) return refuse(N('"{value}" is not on/off'), val);
@@ -966,7 +1217,11 @@ export function checkSetting(key: string, val: string): Checked | Refused | null
       out = e;
       break;
     }
-    case 'num': if (!isNumber(val)) return refuse(N('"{value}" is not a number'), val); break;
+    case 'num': {
+      if (!isNumber(val)) return refuse(N('"{value}" is not a number'), val);
+      if(d?.vals){const [lo,hi]=d.vals.split('..').map(Number);if(!(Number(val)>=lo&&Number(val)<=hi))return refuse(N('"{value}" is not one of {vals}'),val,{vals:d.vals});}
+      break;
+    }
     case 'int':
       if (!intIn(d!.vals!, val)) return refuse(N('"{value}" is not a whole number in {vals}'), val, { vals: d!.vals! });
       if (lower(val) === 'auto') out = 'auto';
@@ -1069,7 +1324,7 @@ export interface Resolved {
  *  TEXPACKS/<name>.pak: '' for original and for map (the maps' pack alone: resolveEnv's NFSU2_MAP_TEXTURES) */
 export function uiPack(v: string | undefined): string {
   const x = (v ?? '').trim().toLowerCase();
-  return x === 'original' || x === 'map' ? '' : x;
+  return x === 'original' || x === 'map' ? '' : x === 'hud' ? 'uhud' : x;
 }
 
 /**
@@ -1140,7 +1395,7 @@ export function resolveEnv(text: string | null, environment: Record<string, stri
   // the maps' pack (TEXPACKS/detailed.pak) comes with the menus' and HUD's: ui_textures = uhud shows both, map only the
   // maps' (uiPack).  NFSU2_MAP_TEXTURES = original in settings.ini keeps the game's maps (a test knob)
   const ui = (env.NFSU2_UI_TEXTURES ?? '').toLowerCase();
-  if (!('NFSU2_MAP_TEXTURES' in env) && ui && ui !== 'original') { env.NFSU2_MAP_TEXTURES = 'detailed'; source.NFSU2_MAP_TEXTURES = source.NFSU2_UI_TEXTURES; }
+  if (!('NFSU2_MAP_TEXTURES' in env) && (ui === 'uhud' || ui === 'map')) { env.NFSU2_MAP_TEXTURES = 'detailed'; source.NFSU2_MAP_TEXTURES = source.NFSU2_UI_TEXTURES; }
   return { env, source, notes, file, byEnv, other };
 }
 

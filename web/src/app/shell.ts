@@ -1,3 +1,7 @@
+import { MediaPanel } from '../vr/media-panel';
+import { vrSettings } from '../vr/settings';
+import {syncVRSettings} from '../vr/settings-values';
+import {editStance,stancePrefs} from '../vr/stance-settings';
 // The start page and everything around a game run: the checks (only a
 // problem is shown), loading the module with progress, the settings, saves
 // and controls on the page, Play -> the game (in the window, or full screen
@@ -42,6 +46,12 @@ import type { PadPage } from '../input/gamepad';
 import type { NetBanCase, NetQueue, NetRaces, NetRemoved, NetRename } from '../net';
 import { blockList, changedSettings, checkSetting, HOST_FIXED, pageOnly, putKey, resolveEnv, TEMPLATE, uiPack, type Resolved } from './settings';
 import { SettingsFile } from './settings-store';
+import {ConnectionProfiles,CONNECTION_FILE,type ConnectionProfile} from './connection-profiles';
+import {ConnectionAuth} from './connection-auth';
+import {ConnectionManager} from './connection-manager';
+import {ConnectionPanel} from './connection-panel';
+import {RacePanel} from './race-panel';
+import {connectProfile,type ProfileGame} from './connection-live';
 import { checkSaves, exists, filesOf, listProfiles, NO_SAVE, PROFILES_DIR, readText, removeSaveDir, SavesOff, setWritesOff, settleStaged, UNREADABLE, writeFile, type SavesCheck } from './savefs';
 import { coverOf, newProfileName, turnOnAutosave } from './profile';
 import { crewControl, SettingsPanel, showCrewCounts } from './settings-ui';
@@ -86,6 +96,11 @@ import type { GameMemory } from '../host/memory';
 import { texSplit } from '../gpu/index';
 import { copyText, copyToast } from './copy';
 import { OTHER_BUILD, PAGE_TAB, sessionStore, UPDATE_FOR } from './prefs';
+
+import { VRLaunch } from '../vr/launch';
+import {HapticsPanel} from './haptics-panel';
+import {enableNativeHaptics,nativeHapticsStatus} from '../vr/native-haptics';
+import { ImmersiveSession } from '../vr/session';
 
 type Phase = 'boot' | 'ready' | 'error' | 'waiting' | 'starting' | 'playing' | 'exited';
 
@@ -154,6 +169,7 @@ const checks = new Map<string, Check>();
 let instance: ReturnType<typeof claimInstance>;
 const settingsFile = new SettingsFile(() => SAVE, s => log.add(s));
 let starting = false;                    // Play pressed, the session not there yet
+let vrSupported = false;
 let savesLocked = false;                 // the game about to start reads the saves: no cloud version comes in (VaultPanel's playing)
 let fatal: { what: string; code?: string } | null = null;   // why the running game had to be stopped (English, for t())
 // the last game lost its graphics (GPU-LOST): Safari's WebGPU gives this page no adapter any more, so Play reloads it
@@ -164,6 +180,7 @@ let fps: FpsOverlay;
 let statusAt: { memory: GameMemory; ptr: number } | null = null;   // the running game's status block
 let radioLink: RadioLink | null = null;  // the radio's words of the running game, once the game says it has them
 const radioPort = () => radioLink ??= statusAt ? RadioLink.open(statusAt.memory, statusAt.ptr) : null;
+let mediaPanel: MediaPanel | null = null;
 let radio: Radio | null = null;          // made at the first click on Radio: a player who never uses it runs none of it
 const theRadio = () => radio ??= new Radio(radioPort, l => log.add(`[radio] ${l}`));
 let lobbyPanel: LobbyPanel;
@@ -185,6 +202,12 @@ let vault: VaultPanel;
 /** the claimed names (claim.ts), and the line under Your name (claim-ui.ts) */
 let claims: NameClaims;
 let nameRow: NameRow;
+let connections:ConnectionManager;
+let connectionPanel:ConnectionPanel;
+/** undefined uses the launch's cloud account; null is an explicitly unlinked
+ * connection profile. This token never changes VaultPanel's saved account. */
+let activeNetClaim:string|null|undefined;
+const networkClaim=()=>activeNetClaim!==undefined?Promise.resolve(activeNetClaim):vault?vault.token():Promise.resolve(null);
 let download: Predownload;
 /** the server does not answer: the page and the module came from this browser's copies (sw.ts), and a game
  *  runs from the game data on this PC */
@@ -299,6 +322,7 @@ function evaluate() {
 function updatePlay() {
   const ok = !!loaded && instance.owner && !blocking() && !starting && (phase === 'ready' || phase === 'exited');
   $<HTMLButtonElement>('#play').disabled = !ok;
+  $<HTMLButtonElement>('#play-vr').disabled = !ok || !vrSupported;
   $('#retry').hidden = checks.get('module')?.state !== 'fail';
 }
 
@@ -507,15 +531,29 @@ async function askFull(c: PlayerCounts | null): Promise<boolean> {
   return alone;
 }
 
-async function play() {
+async function play(inVR = false) {
   if ($<HTMLButtonElement>('#play').disabled || session || starting) return;
+  if (inVR && !vrSupported) return;
   if (byPlay()) { await reloadFor(newer!, 'Play', false); return; }
   if (gpuGone) { log.add('[app] the last game lost its graphics: reloading the page (Play)'); await reload(); return; }
   if (updated) { updated = false; showNewer(); }
   starting = true; updatePlay();
-  try { await startGame(); }
+  let vrLaunch: VRLaunch | undefined;
+  try {
+    mediaPanel?.preparePlayback();
+    if (inVR) {
+      const note = $('#vr-start-note'); note.hidden = true;
+      try { vrLaunch = new VRLaunch(line => log.add(line)); await vrLaunch.ready; }
+      catch (error) {
+        log.add(`[vr] start request: ${error}`);
+        note.textContent = t('VR could not start. Check your headset and browser.'); note.hidden = false;
+        return;
+      }
+    }
+    await startGame(vrLaunch);
+  }
   catch (e) { startFailed(e); }
-  finally { starting = false; savesLocked = false; if (!session) { vault.noGame(); endNoSave(); } updatePlay(); }
+  finally { starting = false; savesLocked = false; if (!session) { vrLaunch?.cancel(); vault.noGame(); endNoSave(); } updatePlay(); }
 }
 
 /** the sound of a game being started, until its session has it (startFailed closes it) */
@@ -584,7 +622,7 @@ async function askNoSave(c: SavesCheck): Promise<boolean> {
 let noSave = false;
 function endNoSave() { if (noSave) { noSave = false; setWritesOff(false); void settings.refresh(); } }    // (its panel writable again)
 
-async function startGame() {
+async function startGame(vrLaunch?: VRLaunch) {
   // settings.ini as it is now (another tab or the raw editor may have changed it,
   // and the Mac app reads it at every launch); a short read, well inside the click's
   // user activation, which full screen needs (after the free-roam question, its
@@ -615,7 +653,7 @@ async function startGame() {
     audio = startAudio = new AudioContext({ latencyHint: hint, sampleRate: 44100 });
     void audio.resume().catch(() => {});
   } catch (e) { log.add(`[app] no AudioContext: ${e}`); }
-  const full = pre.env.NFSFULL !== '0';
+  const full = !vrLaunch && pre.env.NFSFULL !== '0';
   const stage = $('#stage');
   stage.hidden = false;
   $('#app').inert = true;             // the start page is behind the game: out of the focus order and screen readers
@@ -774,6 +812,7 @@ async function startGame() {
   const net = !/^(off|0|none)$/i.test(r.env.NFSU2_NET?.trim() ?? '') && !alone;
   const netName = net ? (r.env.NFSU2_ROAM_NAME?.trim() || 'Player') : null;
   netNameNow = netName ?? ''; coopName = null; coopChecked = '';
+  activeNetClaim=undefined;
   hudWide = !/^(43|4:3)$/i.test(r.env.NFSU2_HUD?.trim() ?? '');
   roamCollide = net && r.env.NFSU2_ROAM === '1' ? collideOf(r.env.NFSU2_ROAM_COLLIDE) : null;
   roamCrews = net && r.env.NFSU2_ROAM === '1' ? crewsOf(r.env.NFSU2_ROAM_CREW ?? '', r.env.NFSU2_ROAM_CREW_RGB ?? '') : null;
@@ -792,7 +831,23 @@ async function startGame() {
     // Menus, HUD and maps on Map only: the maps' pack alone (resolveEnv turned it on), the menus' and HUD's the
     // game's (the game reads the variable's value as a pack's name; r.env keeps the setting, for the day's count)
     const env = r.env.NFSU2_UI_TEXTURES !== undefined && !uiPack(r.env.NFSU2_UI_TEXTURES) ? { ...r.env, NFSU2_UI_TEXTURES: 'original' } : r.env;
+    let cockpitSave = Promise.resolve();
     session = await GameSession.start({
+      vrLaunch,
+      onVRResolution: pixels => settings.setVRResolution(pixels),
+      media: mediaPanel,
+      music:()=>radio,
+      worlds:{read:()=>({room:roamRoom??inviteNow(settingsFile.forGame).room,name:netNameNow}),select:selectVRWorld},
+      connections,
+      saveStance:edit=>{
+        const job=cockpitSave.then(async()=>{
+          if(noSave)throw new SavesOff();
+          const text=await settingsFile.edit(text=>editStance(text,edit).text);
+          vault.changedSaves();void settings.refresh();return stancePrefs(resolveEnv(text,ENVIRONMENT,{},DEVICE).env);
+        });
+        cockpitSave=job.then(()=>{},e=>log.add(`[vr] stance settings: ${e}`));return job;
+      },
+      saveCockpit: values => { if(noSave)return; cockpitSave=cockpitSave.then(()=>settingsFile.edit(text => Object.entries(values).reduce((s,[k,v])=>putKey(s,k,v).text,text))).then(()=>{vault.changedSaves();void settings.refresh();}).catch(e=>log.add(`[vr] settings: ${e}`)); },
       module: loaded!.module, info: loaded!.info, saveDir: SAVE, env, canvas, stage, audio, displayHz, netName, notice, lobby, say, marks, bump, battle, coop: coopMsg,
       friend: friendMsg,
       netBack, netQueue, onSaved, onSaveGone: saveGone, onRemoved, onLost, onSaveTrouble,
@@ -845,7 +900,7 @@ async function startGame() {
     if (!fps.reader) { fps.reader = st.status; if (session === st) statusAt = { memory: st.proc.memory, ptr: st.status.ptr }; }
     if (session === st && radioPort()) {
       $('.menu-radio').hidden = !canPickMusic();   // the menu may have been opened before the game's status block was known
-      if (radioWasOn()) void theRadio().resume();
+      if (radioWasOn() || radio?.externalPlayback) void theRadio().resume();
     }
     if (radioLink || ++tries > 50) clearInterval(waitStatus);
   }, 100);
@@ -1062,6 +1117,8 @@ function onExit(s: GameSession, code: number) {
   s.terminate();
   session = null;
   quitAt = null;
+  activeNetClaim=undefined;
+  void connections.refresh();
   lastExit = { code, seconds };
   endStage();
   players?.now();
@@ -1559,12 +1616,14 @@ function coopMsg(json: string) {
   if (coopName) void coopCheck(coopName);
 }
 async function coopCheck(name: string) {
+  const game=session,claim=activeNetClaim;
   privacy.name(name, 'you');
   const online = onlineName(name);
   if (!online || coopChecked === online.toLowerCase()) return;
   coopChecked = online.toLowerCase();
   const slur = readsAsSlur(name);
   const info = slur || testPage() || offline ? null : await claims.check(online);
+  if(session!==game||activeNetClaim!==claim)return;
   log.add(`[app] player 2's name: ${slur ? 'reads as a slur' : !info ? 'not checked' : info.state === 'yours' || info.state === 'old' ? 'claimed with this browser\'s keyphrase' : info.state}`);
   if (!slur && info?.state !== 'taken' && info?.state !== 'blocked') return;
   const alt = await digitsFor(online, pageId());
@@ -1824,6 +1883,42 @@ async function switchWorld(room: string) {
   log.add(`[app] the menu's World: ${isOwn(room) ? 'a world of the player\'s own' : worldName(room)}`);
   await joinHere({ room }, true);
 }
+/** The headset uses the same saved/live world transition as the page. Return
+ * the result inside its panel, where an ordinary DOM toast is not visible. */
+async function selectVRWorld(room:string):Promise<string>{
+  if(room){const checked=checkRoom(room);if(!checked.ok)return checked.why?tvars(checked.why,checked.v??{}):t('World name');room=checked.name;}
+  try{return joinedText(await applyInvite({room}));}
+  catch(e){return e instanceof SavesOff?t(NO_SAVE):t(UNREADABLE,{error:String(e)});}
+}
+async function applyOnlineProfile(p:ConnectionProfile,claim:string|null,race:boolean):Promise<boolean>{
+  const game=session,net=game?.net;
+  if(!game||!net?.profile||!net.room||!game.input?.name||!race&&roamRoom===null)return false;
+  const adapter:ProfileGame={
+    ready:()=>game.exitCode===null&&(race?!!game.raceBrowser.snapshot?.canEnter:game.status?.read()?.get('profile_roam')===1),
+    nameHash:()=>game.status?.read()?.get('roam_name'),
+    profile:value=>net.profile!(value),name:value=>game.input?.name?.(value)??false,
+    room:value=>roamRoom===null||net.room!(roomText(value)),reset:()=>game.mod?.reset(),
+  };
+  if(!await connectProfile(adapter,()=>session===game?adapter:null,p,claim))return false;
+  activeNetClaim=claim;netNameNow=p.name;if(roamRoom!==null)roamRoom=p.room;coopName=null;coopChecked='';
+  privacy.name(p.name,'player');if(isOwn(p.room))privacy.name(p.room,'room');
+  friendPrompt.roomChanged();ghostFollow();worldLineSoon(true);return true;
+}
+async function connectOnlineProfile(p:ConnectionProfile,claim:string|null):Promise<string>{
+  if(!session?.net?.profile||!session.net.room||!session.input?.name||roamRoom===null)return t('Start career free roam with online play enabled first.');
+  if(session.status?.read()?.get('profile_roam')!==1)return t('Only while you drive in free roam.');
+  return await applyOnlineProfile(p,claim,false)?t('Connecting to free roam…'):t('The connection change could not be completed.');
+}
+async function disconnectOnlineProfile():Promise<string>{
+  const game=session;
+  if(!game?.net?.profile)return t('Disconnected.');
+  if(!await game.net.profile(null))return t('The connection change could not be completed.');
+  game.mod?.reset();return t('Disconnected.');
+}
+async function manageOnlineProfile():Promise<string>{
+  if(!session&&!starting){bigTabs.show('online');$('#set-roam_name')?.focus();}
+  return t('To reserve a name, quit the game and open Online on this page. Choose Claim / change name and keep the eight-word passphrase. Link it to this profile before connecting.');
+}
 /** the game's trips (tracks.ts travelState of its status's "travel"): where the car is and why a trip cannot go now;
  *  null: none (a module without them, no game, or not in a career) */
 const travelNow = () => (session?.input?.travel ? travelState(session.status?.read()?.get('travel')) : null);
@@ -2063,6 +2158,7 @@ function inviteLive(): boolean {
  *  did not read or write (nothing joined, nothing written: joinHere says so).  The names as checkInvite read them
  *  (tidyInvite), whichever way they came. */
 async function applyInvite(given: Invite): Promise<Joined> {
+  const game=session;
   const inv = tidyInvite(given);
   const was = await settingsFile.peek() ?? settingsFile.forGame ?? TEMPLATE;
   const now = inviteNow(was), d = inviteDiff(inv, now);
@@ -2083,7 +2179,7 @@ async function applyInvite(given: Invite): Promise<Joined> {
   // (the names, for the log as it leaves the browser: privacy.ts)
   if (isOwn(inv.room ?? '')) privacy.name(inv.room, 'room');
   if (inv.crew) privacy.name(inv.crew, 'crew');
-  const live = inviteLive();
+  const live = inviteLive()&&session===game;
   if (live && session?.net && roamCrews && inv.crew && !roamCrews.some(c => sameName(c.name, inv.crew!)) && roamCrews.length < CREW_MAX) {
     roamCrews = [...roamCrews, { name: inv.crew, rgb: freeColour(roamCrews) }];
     session.net.crews?.(roamCrews.map(c => roomHash(c.name)), rgbWords(roamCrews));
@@ -2195,6 +2291,7 @@ function showRadio(m: HTMLElement) {
 }
 async function radioClick(act: 'radio' | 'radio-folder') {
   const r = theRadio();
+  if (act === 'radio' && !r.on) mediaPanel?.stop();
   try { await (act === 'radio-folder' ? r.chooseFolder(pickMusic) : r.on ? r.turnOff() : r.turnOn(pickMusic)); } catch (e) { log.add(`[radio] ${act}: ${e}`); }
 }
 const MODE_WORDS: Record<Mode, string> = { menu: N('Menu'), racing: N('Race'), all: N('All'), off: N('Off') };
@@ -2589,29 +2686,31 @@ export async function boot() {
   scrobbleWhilePlaying(radioPort, scrobbler, readSession);
   onLanguage(() => lastfmRow.render());
   settings = new SettingsPanel($('#settings'), {
+    scene:()=>session?.cockpit?.scene??null,
     // another language, texture pack or songs count other files as the game data (its pack); a keyphrase sends the file
-    file: settingsFile, environment: ENVIRONMENT, defaults: DEVICE, onSaved: (_, was) => {
+    file: settingsFile, environment: ENVIRONMENT, defaults: DEVICE, onSaved: (text, was) => {
+      session?.community?.sync(resolveEnv(was,ENVIRONMENT,{},DEVICE).env,resolveEnv(text,ENVIRONMENT,{},DEVICE).env);
+      session?.stance?.sync(resolveEnv(text,ENVIRONMENT,{},DEVICE).env);
+      if(session?.cockpit)syncVRSettings(session.cockpit.settings,resolveEnv(was,ENVIRONMENT,{},DEVICE).env,resolveEnv(text,ENVIRONMENT,{},DEVICE).env);
       if (packsKey() !== packsKey(resolveEnv(was, ENVIRONMENT, {}, DEVICE))) void saves.refresh();
-      vault?.changed(); players?.now();
+      vault?.changed(); players?.now(); mediaPanel?.refresh();
       friendsPanel?.render();
       evaluate();
       applyLanguage();
       siteKeysNow();
     },
-    onLoaded: () => { applyLanguage(); siteKeysNow(); },
+    onLoaded: () => { applyLanguage(); siteKeysNow(); mediaPanel?.refresh(); },
     // the tab that owns the saves is the one whose Play reads the file: another tab only looks
     readOnly: () => !instance.owner, say: pageToast, confirm: confirmBox,
     nameRow: (row, input, ctl) => nameRow.attach(row, input, ctl),
     quietSave: (key, value) => key === 'roam_name' && nameRow.notPlayed(value),
     rowAfter: key => key === 'race_music' ? lastfmRow.el : null,
   }, $('#online'));
+  mediaPanel = new MediaPanel($('#media-library'), { radio: theRadio, settings: () => vrSettings(resolveEnv(settingsFile.text, ENVIRONMENT, {}, DEVICE).env), log: logLine });
   // the language picker at the top: the same setting as the Game tab's Language
   const pick = $<HTMLSelectElement>('#lang-pick');
   pick.replaceChildren(...LANGUAGES.map(l => Object.assign(document.createElement('option'), { value: l, textContent: NATIVE[l], lang: LOCALE[l] })));
   pick.onchange = () => void settings.set('language', pick.value);
-  // Donate at the top: a popup with the Ko-fi link, closed as Ko-fi opens in its own tab
-  $('#donate-btn').onclick = () => $<HTMLDialogElement>('#donate').showModal();
-  $('#donate-go').onclick = () => $<HTMLDialogElement>('#donate').close();
   // Changelog at the top: CHANGELOG.md's releases in a popup
   changelog($('#changelog-btn'), $<HTMLDialogElement>('#changelog'), $('#changelog-body'));
   fitTop(); onLanguage(fitTop); window.addEventListener('resize', fitTop); void document.fonts.ready.then(fitTop);
@@ -2629,11 +2728,11 @@ export async function boot() {
   download = new Predownload(s => saves.showData(s), logLine, () => language(), () => packs());
   saves = new SavesPanel($('#saves'), $('#game-data'), {
     saveDir: SAVE, busy: () => !!session || starting || !instance.owner, confirm: confirmBox,
-    onRestored: () => { void loadSettings().catch(e => log.add(`[app] settings.ini not read again: ${e}`)); void settings.refresh(); }, download, onChanged: () => vault.changedSaves(),
+    onRestored: () => { void loadSettings().catch(e => log.add(`[app] settings.ini not read again: ${e}`)); void settings.refresh(); void connections?.refresh(); }, download, onChanged: () => vault.changedSaves(),
   });
   // keyphrase saves (on a server that keeps them): synced by the tab that owns the saves, once its settings are loaded
   // the claimed names: asked with the keyphrase's token (claim.ts); the line under Your name (claim-ui.ts)
-  claims = new NameClaims(() => vault ? vault.token() : Promise.resolve(null));
+  claims = new NameClaims(networkClaim);
   nameRow = new NameRow({
     claims, seed: pageId, linked: () => !!vault?.linked(), enable: enableCloud, showPassphrase,
     profileName: async () => (await newestProfile())?.name ?? null,
@@ -2645,11 +2744,22 @@ export async function boot() {
   vault = new VaultPanel($('#vault'), {
     saveDir: SAVE, owner: () => instance.owner, playing: () => !!session || savesLocked, busy: () => !!session || starting || !instance.owner,
     confirm: confirmBox, choose: (title, body, ok, cancel, danger, cancelDanger) => choiceBox(title, body, ok, cancel, danger, '', cancelDanger),
-    onRestored: () => { void loadSettings().catch(e => log.add(`[app] settings.ini not read again: ${e}`)); void settings.refresh(); void saves.refresh(); }, log: logLine,
+    onRestored: () => { void loadSettings().catch(e => log.add(`[app] settings.ini not read again: ${e}`)); void settings.refresh(); void saves.refresh(); void connections?.refresh(); }, log: logLine,
     // another passphrase here (or none): the line under Your name asks again with it, and the friends
     onLink: () => { void nameRow.ask(); void friendsPanel.refresh(true); },
   });
-  friendsApi = new FriendsApi(() => testClaim() ? Promise.resolve(testClaim()) : vault ? vault.token() : Promise.resolve(null));
+  connections=new ConnectionManager(new ConnectionProfiles({
+    read:()=>readText(SAVE,CONNECTION_FILE),write:async text=>{
+      if(!instance.owner||starting||noSave)throw new SavesOff();
+      await writeFile(SAVE,CONNECTION_FILE,text);vault.changedSaves();
+    },
+  },undefined,oneWriter),new ConnectionAuth(SAVE),{
+    writable:()=>instance.owner&&!starting&&!noSave,
+    connect:connectOnlineProfile,race:(p,claim)=>applyOnlineProfile(p,claim,true),disconnect:disconnectOnlineProfile,manage:manageOnlineProfile,
+    online:()=>session?.net?.stats?.()['lan online']===1,
+  });
+  connectionPanel=new ConnectionPanel($('#connection-profiles'),connections,()=>!instance.owner||starting||noSave);
+  friendsApi = new FriendsApi(() => testClaim() ? Promise.resolve(testClaim()) : networkClaim());
   friendsPanel = new FriendsPanel($('#friends'), {
     api: friendsApi, join: room => void offerInvite({ room }), confirm: (title, body, ok) => confirmBox(title, body, ok),
     idle: () => !session && !starting, log: logLine, store: msgStore, chat: name => chatDialog.open(name), waiting: friendsWaiting,
@@ -2657,6 +2767,17 @@ export async function boot() {
   });
   chatDialog = new ChatDialog(msgStore, { send: (name, body) => friendsPanel.send(name, body), log: logLine });
   $<HTMLButtonElement>('#play').onclick = () => void play();
+  $<HTMLButtonElement>('#play-vr').onclick = () => void play(true);
+  new HapticsPanel($('#haptics-setup'),{status:nativeHapticsStatus,enable:enableNativeHaptics});
+  const checkVR = async () => {
+    vrSupported = await ImmersiveSession.supported();
+    const note = $('#vr-start-note');
+    note.textContent = vrSupported ? '' : t('VR is unavailable in this browser. You can play on your screen.');
+    note.hidden = vrSupported;
+    updatePlay();
+  };
+  void checkVR();
+  navigator.xr?.addEventListener('devicechange', () => void checkVR());
   $<HTMLButtonElement>('#retry').onclick = () => void loadModule();
   $<HTMLButtonElement>('#reload').onclick = () => void reload();
   $<HTMLButtonElement>('#log-btn').onclick = downloadLog;
@@ -2715,8 +2836,9 @@ export async function boot() {
   siteView.render($('#keys .site-box'), true);
   // what the page drew itself, again in the language picked (the markup and the live texts redraw themselves)
   onLanguage(() => {
+    void checkVR();
     renderProblems(); evaluate(); settings.render(); void saves.refresh(); vault.refresh(); keySheet.relabel(); lobbyPanel.redraw(); touch.relabel();
-    friendsPanel.render(); siteView.render();
+    friendsPanel.render(); siteView.render(); connectionPanel.render();
     helpSheet = null; helpSiteView = null; $('#help-body').replaceChildren();
     if (menuOn('controls')) openHelp();
     syncPicker();
@@ -2744,6 +2866,7 @@ export async function boot() {
     placeNow: placeNotices, focusGame: () => $('#stage').querySelector('canvas')?.focus({ preventScroll: true }), toast: s => toast(s, 5000), log: logLine,
   });
   textField = new TextField($('#stage'), { log: logLine });
+  new RacePanel($('#stage'),()=>session,()=>session?.gameLanguage??'english');
   pauseHint = new PauseHint($('#stage'), {
     open: openMenu, log: logLine,
     roam: () => roamCollide !== null && !!session?.net?.solid,
@@ -2776,6 +2899,7 @@ export async function boot() {
   void settings.refresh().then(() => bigTabs.settled());
   void saves.refresh();
   void vault.start().then(() => friendsPanel.refresh(true));
+  void connections.refresh();
   void instance.whenOwner.then(async () => {
     // a restore a closed tab left halfway is undone, before anything reads the saves (savefs.ts writeTogether)
     await oneWriter(async () => {
@@ -2784,7 +2908,7 @@ export async function boot() {
     }).catch(e => log.add(`[app] a restore that stopped halfway could not be undone: ${e}`));
     // (one that did not read is left as it is, and Play says why the game cannot start: checkSaves)
     await loadSettings().catch(e => log.add(`[app] settings.ini could not be read: ${e}; left as it is`));
-    evaluate(); void settings.refresh(); void saves.refresh(); vault.ownerNow(); syncPicker(); });
+    evaluate(); void settings.refresh(); void saves.refresh(); void connections.refresh(); vault.ownerNow(); syncPicker(); });
   // invite links: the one this page was opened with, one pasted into its address later, one another tab took for it
   hearInvites();
   takeInvite();

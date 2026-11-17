@@ -151,12 +151,13 @@ static float bitsf(uint32_t u){ float f; memcpy(&f, &u, 4); return f; }
 #define PUT(f, v) __atomic_store_n(&(f), (v), __ATOMIC_RELAXED)
 static struct { uint32_t gain, pitch; } g_in[SEATS][W_N];
 static uint32_t g_stamp, g_level;     /* the targets' time (ms); the level (Master x Engine, 0 paused) */
+static int g_started;
 static int g_on = -1;                 /* the setting (game thread) */
 
 static void whine_init(void){
-    if (g_on >= 0) return;
-    g_on = setting_bool("NFSU2_GEARBOX_WHINE", 0);
-    if (!g_on) return;
+    if (g_on < 0) g_on = setting_bool("NFSU2_GEARBOX_WHINE", 0);
+    if (!g_on || g_started) return;
+    g_started=1;
     int have = 1;
     for (int w = 0; w < W_N; w++) have = have && fileio_mod_pack(k_file[w], g_path[w], sizeof g_path[w]);
     if (!have){
@@ -233,6 +234,16 @@ static void seat_step(int s, uint32_t car, float dt){
     put(s, W_WHINE, g1, pitch);
     put(s, W_WHINE2, kmh < 1.f ? 0.f : g2, pitch2);
     put(s, W_REVERSE, kmh < 1.f ? 0.f : gr, pitch);
+}
+
+void whine_set_enabled(int enabled){
+    if((enabled!=0 && enabled!=1) || g_on==enabled)return;
+    g_on=enabled;
+    if(!enabled){
+        PUT(g_level,fbits(0.f)); PUT(g_stamp,now_ms());
+        for(int s=0;s<SEATS;s++)seat_quiet(s);
+    }
+    fprintf(stderr,"[whine] gearbox whine %s\n",enabled?"on":"off");
 }
 
 void whine_frame(void){

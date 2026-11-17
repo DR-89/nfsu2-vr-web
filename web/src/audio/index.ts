@@ -22,6 +22,8 @@
 //   - autotest "audioreset": the pump bumps AR_RESET and the context is rebuilt.
 import type { GameProcess } from '../host/process';
 import { HostKind } from '../host/abi';
+import { ShiftClickSound } from './shift-click';
+import { masterGain } from './master-gain';
 import {
   AR_CTX, AR_CTX_CLOSED, AR_CTX_RUNNING, AR_CTX_SUSPENDED, AR_FRAMES, AR_HDR_WORDS, AR_LOUD, AR_MAGIC, AR_MIXED, AR_MODE, AR_MUTED,
   AR_NOSOUND, AR_OFF_PCM, AR_PAGE_RATE, AR_PEAK, AR_QUANTA, AR_R, AR_RESET, AR_RMS, AR_TARGET, AR_UNDERRUNS,
@@ -34,6 +36,7 @@ export interface AudioOptions {
    *  Without it one is made here: 44.1 kHz, opts.latencyHint. */
   context?: AudioContext | null;
   volume?: number;                                   // 0..1 master volume (default 1)
+  masterGainDB?: () => number;                       // live profile trim, -12..12 dB
   muteWhenHidden?: boolean;                          // default true
   suspendWhenHidden?: boolean;                       // also suspend the context (default false)
   latencyHint?: AudioContextLatencyCategory | number; // default 'interactive'
@@ -55,6 +58,7 @@ export interface AudioHandle {
   readonly context: AudioContext | null;
   resume(): Promise<void>;
   setVolume(v: number): void;
+  shiftClick():void;
   /** everything, for test pages and logs */
   status(): AudioStats;
   /** numbers only, for the app's detailed overlay */
@@ -95,6 +99,7 @@ function endOutput(c: AudioContext, n: AudioWorkletNode | null, log: (s: string)
 }
 
 export async function attachAudio(proc: GameProcess, opts: AudioOptions = {}): Promise<AudioHandle> {
+  const shiftSound=new ShiftClickSound();
   const log = opts.log ?? ((s: string) => console.log(s));
   const target = opts.gestureTarget ?? window;
   let volume = Math.max(0, Math.min(1, opts.volume ?? 1));
@@ -108,7 +113,8 @@ export async function attachAudio(proc: GameProcess, opts: AudioOptions = {}): P
     Atomics.store(h, AR_CTX, st === 'running' && node ? AR_CTX_RUNNING : st === 'suspended' ? AR_CTX_SUSPENDED
       : st === 'running' ? AR_CTX_SUSPENDED : AR_CTX_CLOSED);
   };
-  const audible = () => (opts.muteWhenHidden ?? true) && document.hidden ? 0 : volume;
+  let trim=masterGain(opts.masterGainDB?.()??0);
+  const audible = () => (opts.muteWhenHidden ?? true) && document.hidden ? 0 : volume*trim;
 
   let given = opts.context && opts.context.state !== 'closed' ? opts.context : null;
   async function build() {
@@ -150,6 +156,7 @@ export async function attachAudio(proc: GameProcess, opts: AudioOptions = {}): P
     ctxWord();
   }
   function teardown() {
+    shiftSound.stop();
     if (h) Atomics.store(h, AR_CTX, AR_CTX_CLOSED);
     const c = ctx, n = node; ctx = null; node = null; gain = null;
     if (c) endOutput(c, n, log);
@@ -184,7 +191,10 @@ export async function attachAudio(proc: GameProcess, opts: AudioOptions = {}): P
   // the ring arrives when the game creates its first sound buffer
   let resetSeen = 0;
   const poll = setInterval(() => {
-    if (!h || closed) return;
+    if (closed) return;
+    const next=masterGain(opts.masterGainDB?.()??0);
+    if(next!==trim){trim=next;if(gain&&ctx)gain.gain.setTargetAtTime(audible(),ctx.currentTime,0.015);}
+    if (!h) return;
     const r = Atomics.load(h, AR_RESET);
     if (r !== resetSeen) { resetSeen = r; void rebuild('requested by the game (audioreset)'); }
   }, 200);
@@ -219,6 +229,7 @@ export async function attachAudio(proc: GameProcess, opts: AudioOptions = {}): P
     get context() { return ctx; },
     resume,
     setVolume(v: number) { volume = Math.max(0, Math.min(1, v)); if (gain && ctx) gain.gain.setTargetAtTime(audible(), ctx.currentTime, 0.015); },
+    shiftClick() {if(!closed&&ctx?.state==='running'&&gain&&audible()>0)shiftSound.play(ctx,gain);},
     stats(): AudioCounters {
       const st = handle.status();
       const rate = st.sampleRate || AUDIO_RATE;

@@ -13,7 +13,8 @@
  *   NFSU2_FPS = auto | 30 | 60 | 120 | 240 | uncapped | off
  *       auto (default): the window's screen maximumFramesPerSecond mapped to
  *       the best supported content rate (>= 239 Hz -> 240, >= 119 Hz -> 120,
- *       up to 31 Hz -> 30, otherwise 60).  30 Hz is a browser that halves its
+ *       up to 31 Hz -> 30, otherwise 60; immersive WebXR also follows
+ *       72, 80 and 90 Hz).  30 Hz is a browser that halves its
  *       animation frames (Safari in Low Power Mode, or on a Mac nobody has
  *       touched for a minute; Chrome's Energy Saver): it shows only every
  *       other frame of 60, so the game makes the half it shows.  The game's
@@ -83,6 +84,7 @@
  */
 #include "cpu.h"
 #include "game.h"
+#include "framerate_rate.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -167,10 +169,12 @@ static int display_hz(void){
 void hfr_set_display_hz(int hz){ atomic_store(&g_hz_forced, hz > 0 ? hz : 0); }
 /* best supported content rate for a refresh rate */
 static int rate_for_hz(int hz){
-    if (hz >= 239) return 240;
-    if (hz >= 119) return 120;
-    if (hz > 0 && hz <= 31) return 30;
-    return 60;
+    int immersive = 0;
+#ifdef __wasm__
+    int metal_display_immersive(void);
+    immersive = metal_display_immersive();
+#endif
+    return hfr_auto_rate(hz, immersive);
 }
 static void parse_mode(void){
     const char *e = getenv("NFSU2_FPS");
@@ -227,7 +231,9 @@ static int fix_for_rate(int r){ return r > 60 || r == 0 ? g_fix_hi : r <= 30 ? g
 
 /* Tick base 1/3600 s: 30, 60, 120 and 240 fps are 120, 60, 30 and 15 whole
  * ticks, so every supported rate gets dt = exactly 1/rate and the car
- * substep h = 1/240 s.  The three constants are read only by 0x57EAD0 and
+ * substep h = 1/240 s. VR's 72, 80 and 90 Hz are also whole ticks (50, 45,
+ * 40); the original physics integrator subdivides their steps. The three
+ * constants are read only by 0x57EAD0 and
  * 0x576CE0 (replay ticks -> s).  The JoyLog 8-bit tick field still fits
  * (180 at the 50 ms maximum).  1800 Hz (vanilla) cannot express 240 fps. */
 static void set_tick_base(int on){

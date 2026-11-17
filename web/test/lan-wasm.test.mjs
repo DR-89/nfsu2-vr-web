@@ -10,10 +10,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {findWasi,execBuild} from '../tools/build-tools.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const WASI = fs.readdirSync(path.join(REPO, 'deps')).filter(d => d.startsWith('wasi-sdk-')).map(d => path.join(REPO, 'deps', d)).pop();
-const CC = WASI && path.join(WASI, 'bin/clang');
+const WASI = findWasi(REPO);
+const CC = WASI && `${WASI}/bin/clang`;
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
 // web/build.sh's target, features and defines
 const FLAGS = ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-msimd128', '-mbulk-memory', '-mnontrapping-fptoint',
@@ -25,7 +26,7 @@ const LINK = ['-Wl,--import-memory,--export-memory,--shared-memory,--initial-mem
 
 test('lan_unit on wasm (winsock.c + net_lan.c)', { skip: !CC && 'no wasi-sdk in deps/' }, () => {
   const w = path.join(OUT, 'lan_unit.wasm');
-  execFileSync(CC, [...FLAGS, '-o', w, 'web/test/lan_unit.c', 'runtime/winsock.c', 'runtime/web/net_lan.c', 'runtime/web/sha256.c',
+  execBuild(CC, [...FLAGS, '-o', w, 'web/test/lan_unit.c', 'runtime/winsock.c', 'runtime/web/net_lan.c', 'runtime/web/sha256.c',
     'runtime/mem.c', 'runtime/web/thread_exit.c', ...LINK], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const run = spawnSync(process.execPath, [path.join(REPO, 'web/test/wasi-run.mjs'), w], { encoding: 'utf8', timeout: 120_000 });
   const out = run.stdout ?? '', err = run.stderr ?? '';

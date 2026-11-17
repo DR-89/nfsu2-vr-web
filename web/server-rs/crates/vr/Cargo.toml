@@ -1,0 +1,14 @@
+[package]
+name = "nfsu2-vr"
+description = "Shared cockpit poses and opt-in CopChase authority for nfsu2-vr-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

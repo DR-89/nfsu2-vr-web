@@ -14,7 +14,7 @@ import http from 'node:http';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { spawn } from 'node:child_process';
-import { serverCommand } from '../tools/server-cmd.mjs';
+import { serverCommand, waitForServer } from '../tools/server-cmd.mjs';
 
 const PORT = +(process.env.NFSU2_TEST_MODULE_PORT || 8533);
 const TMP = fs.mkdtempSync(path.join(process.env.TMPDIR || os.tmpdir(), 'nfsu2-module-test-'));
@@ -37,13 +37,12 @@ function build(seed) {
 async function server() {
   const srv = spawn(...serverCommand(['--data', DATA, '--http-port', String(PORT), '--state', path.join(TMP, 'state'), '--wasm', WASM]),
     { stdio: ['ignore', 'pipe', 'pipe'] });
-  await new Promise((res, rej) => {
-    let out = '';
-    const t = setTimeout(() => rej(new Error('server did not start: ' + out)), 15000);
-    srv.stdout.on('data', d => { out += d; if (out.includes('  access    :')) { clearTimeout(t); res(); } });
-    srv.on('exit', c => { clearTimeout(t); rej(new Error('server exited ' + c + ' ' + out)); });
-  });
-  return { stop: async () => { const gone = srv.exitCode !== null ? null : new Promise(r => srv.once('exit', r)); srv.kill(); await gone; } };
+  const stop = async () => {
+    const gone = !srv.pid || srv.exitCode !== null || srv.signalCode !== null ? null : new Promise(r => srv.once('exit', r));
+    srv.kill(); await gone;
+  };
+  try { await waitForServer(srv, PORT); } catch (error) { await stop(); throw error; }
+  return { stop };
 }
 /** an answer and its body, decoded */
 function get(p, { ae = 'gzip, deflate, br, zstd', method = 'GET', headers = {} } = {}) {

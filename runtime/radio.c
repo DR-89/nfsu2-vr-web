@@ -29,6 +29,7 @@
  * Outside the browser (the Mac port and its tests) the wrappers at the end call the game's own code. */
 #include "cpu.h"
 #include "game.h"
+#include "guest.h"
 #include "guest_span.h"
 
 /* ---- the game's functions (sub_ names are the lifter's; tools/genstamp.sh reads the _orig ones from here) ---- */
@@ -44,6 +45,7 @@ void sub_00739320_orig(CPU *c);   /* stops a song (24 places in the game): the t
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 uint32_t gheap_alloc(int heap, uint32_t n, int zero);
 void guest_noyield(int d);        /* win32_ext.c: no fair yield, a free mutex taken without handing the GIL over */
 
@@ -95,8 +97,8 @@ void guest_noyield(int d);        /* win32_ext.c: no fair yield, a free mutex ta
 
 enum { SONG_GAME, SONG_WAITING, SONG_FOLDER, SONG_SILENT };   /* who makes the sound of the song playing now */
 
-typedef struct { uint32_t reader[MUSIC_INPUTS], count; uint8_t side[MUSIC_INPUTS]; int paused; } Music;   /* the song's readers: none while the game has no song in the mixer */
-typedef struct { int who, over, ended, again; uint32_t place, seq, read[CHANNELS], phase[CHANNELS], waited, starved; } Song;   /* place: 0 menus, 1 driving */
+typedef struct { uint32_t reader[MUSIC_INPUTS], count, owner, handle, voice; uint8_t side[MUSIC_INPUTS]; int paused; } Music;   /* the song's readers: none while the game has no song in the mixer */
+typedef struct { int who, over, ended, again; uint32_t place, seq, read[CHANNELS], phase[CHANNELS], waited, starved, seek, seek_frame; } Song;   /* place: 0 menus, 1 driving */
 typedef struct { uint32_t total, written; } PageNow;   /* the page's words at the start of this mixer step, for both readers */
 typedef struct {
     int was_on;
@@ -114,7 +116,7 @@ static Song g_song;
 static PageNow g_page_now;
 static Radio g_radio = { .lent = NO_TAGS_LENT };
 
-typedef struct { uint64_t frames; uint32_t seq; int ended; } Heard;   /* the song playing as the page was told of it */
+typedef struct { uint64_t frames; uint32_t seq, index, kind; int ended; } Heard;   /* the song playing as the page was told of it */
 static Heard g_heard;
 static void song_heard_start(HostStatusRadio *r, uint32_t kind, unsigned index);
 
@@ -232,6 +234,7 @@ static void follow_music_inputs(HostStatusRadio *r){
     memcpy(g_music.side, side, sizeof side);
     g_music.count = MUSIC_INPUTS;
     g_music.paused = speed == 0;
+    g_music.owner = player; g_music.handle = MR32(player + MUSIC_STREAM); g_music.voice = voice;
 }
 
 /* The game stops its song with the call at the top, here from the start of the mixer step, on a copy of the
@@ -345,6 +348,26 @@ static void take_page_now(const HostStatusRadio *r){
     g_page_now.written = __atomic_load_n(&r->reply.written, __ATOMIC_ACQUIRE);
 }
 
+/* Only the mixer may reposition the readers. Freeze both channels for a step,
+ * acknowledge, and resume only after the page has replaced the ring contents.
+ * Track identity prevents a delayed drag from seeking a subsequent song. */
+static void folder_seek(HostStatusRadio *r){
+    RadioCockpit *p=&r->cockpit;
+    if(g_song.who!=SONG_FOLDER || !radio_on(r)){g_song.seek=0;return;}
+    if(g_song.seek){
+        if(__atomic_load_n(&p->seek_ready,__ATOMIC_ACQUIRE)==g_song.seek){
+            for(unsigned ch=0;ch<CHANNELS;ch++){g_song.read[ch]=g_song.seek_frame;g_song.phase[ch]=0;}
+            g_song.over=g_song.ended=0;g_song.starved=0;g_song.seek=0;
+        }
+        return;
+    }
+    uint32_t seq=__atomic_load_n(&p->seek_seq,__ATOMIC_ACQUIRE);
+    if(!seq || seq==p->seek_ack || p->seek_track!=g_song.seq || p->seek_frame>=r->reply.total || g_radio.stop)return;
+    g_song.seek=seq;g_song.seek_frame=p->seek_frame;
+    __atomic_store_n(&r->rings.read,g_song.seek_frame,__ATOMIC_RELEASE);
+    __atomic_store_n(&p->seek_ack,seq,__ATOMIC_RELEASE);
+}
+
 /* the Game Music Volume slider counts while driving; in the menus the game's own music is at the menu's level */
 static float track_volume(void){
     float slider = MRF32(GAME_MUSIC_VOLUME);
@@ -426,6 +449,7 @@ static void song_heard_start(HostStatusRadio *r, uint32_t kind, unsigned index){
     char (*text)[RADIO_TAG] = r->song_text;
     g_heard.frames = 0;
     g_heard.ended = 0;
+    g_heard.index = index + 1u; g_heard.kind = kind;
     g_heard.seq += 2u;
     __atomic_store_n(&r->song_seq, g_heard.seq - 1u, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
@@ -457,10 +481,14 @@ static void song_heard_frames(HostStatusRadio *r, uint32_t reader, uint32_t n, u
     }
 }
 
+#include "web/radio_cockpit.h"
+
 /* ---- the wrappers: the radio in the browser, the game's own code elsewhere ---- */
 
 void sub_007292bc(CPU *c){
     HostStatusRadio *r = host_status_radio();
+    cockpit_radio_step(c, r);
+    folder_seek(r);
     int on = radio_on(r);
     uint32_t skip = __atomic_load_n(&r->skip, __ATOMIC_ACQUIRE);
     if (!on && !g_radio.was_on && !g_radio.stop && g_radio.lent == NO_TAGS_LENT && skip == g_radio.skip_seen){
@@ -472,7 +500,7 @@ void sub_007292bc(CPU *c){
     if (!on) switch_off();
     g_radio.was_on = on;
     if (on && g_song.who == SONG_SILENT && page_has_track_for(r, g_song.place)) g_radio.stop = "a track fits this place now";
-    if (on && !g_radio.stop && g_song.who == SONG_FOLDER && g_song.over && !g_song.ended) g_radio.stop = "track over";
+    if (on && !g_radio.stop && !g_song.seek && g_song.who == SONG_FOLDER && g_song.over && !g_song.ended) g_radio.stop = "track over";
     if (skip != g_radio.skip_seen){
         g_radio.skip_seen = skip;
         skip_song(r);
@@ -496,6 +524,7 @@ void sub_00739320(CPU *c){
 
 void sub_004580e0(CPU *c){
     HostStatusRadio *r = host_status_radio();
+    cockpit_radio_select(c);
     unsigned index = MR32(c->esp + TRAX_START_INDEX) & 0xffffu;
     return_tags();
     g_song.again = 0;
@@ -525,17 +554,19 @@ void sub_0072d18d(CPU *c){
         || n > MIXER_MAX_FRAMES || !in_guest(out, 4u * n)){
         sub_0072d18d_orig(c);
         song_heard_frames(r, reader, n, c->eax);
+        cockpit_radio_samples(r, reader, out, n, c->eax);
         return;
     }
     sub_0072d18d_orig(c);
-    if (g_song.who == SONG_FOLDER && !g_music.paused){
+    if (g_song.who == SONG_FOLDER && !g_music.paused && !g_song.seek){
         read_folder_track(r, ring_of_reader(reader), out, n);
     } else {
         memset(g_mem + out, 0, 4u * n);
-        if (g_song.who != SONG_SILENT) g_song.waited += n;
+        if (g_song.who != SONG_SILENT && !g_song.seek) g_song.waited += n;
     }
     if (g_song.who != SONG_SILENT) c->eax = n;   /* never the end of the stream, also past the track's end (see the top) */
-    song_heard_frames(r, reader, n, n);
+    if(!g_song.seek)song_heard_frames(r, reader, n, n);
+    cockpit_radio_samples(r, reader, out, n, n);
 }
 #else
 void sub_007292bc(CPU *c){ sub_007292bc_orig(c); }

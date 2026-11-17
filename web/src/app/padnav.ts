@@ -12,8 +12,11 @@ import { PAD_A, PAD_B, PAD_DDOWN, PAD_DLEFT, PAD_DRIGHT, PAD_DUP, PAD_START } fr
 /** the open modal dialog of the page (of two, the one on top: the one later in the page, as the playlist after the
  *  menu), or null */
 export function pageDialog(): HTMLDialogElement | null {
-  const open = document.querySelectorAll<HTMLDialogElement>('dialog[open]:modal');
-  return open[open.length - 1] ?? null;
+  // This runs at controller-poll frequency. The live tag collection avoids a
+  // selector walk through the entire settings page when no dialog is open.
+  const dialogs=document.getElementsByTagName('dialog');
+  for(let i=dialogs.length-1;i>=0;i--){const d=dialogs[i];if(d.open&&d.matches(':modal'))return d;}
+  return null;
 }
 
 /** a dialog the controller works: its focus ring shows (data-pad), until it closes */

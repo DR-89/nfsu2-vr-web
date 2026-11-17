@@ -238,6 +238,17 @@ export interface PadPage {
 
 /** the touch controls' share of the pad (web/src/app/touch.ts): PAD_* button bits and the left stick's x */
 export interface TouchPad { buttons: number; lx: number }
+/** The tracked controllers use the wheel's linear steering and separate pedals.
+ * The XR owner refreshes this each frame; stopped tracking cannot hold an axis. */
+export interface SpatialPad { steer: number; throttle: number; brake: number; buttons: number }
+/** XR feedback shares the existing force-feedback producer. Its heartbeat
+ * selects the output device without changing ordinary desktop rumble. */
+export interface SpatialFeedback { controllers:boolean; rumble:boolean; engine:number; road:number }
+export function spatialSnapshot(p: SpatialPad): PadSnapshot {
+  const value = (v: number, lo = 0) => Number.isFinite(v) ? Math.max(lo, Math.min(1, v)) : 0;
+  return { connected: true, wheel: true, family: PADF_GENERIC, name: 'VR controllers', index: -3,
+    buttons: p.buttons & ((1 << 15) - 1), axes: [value(p.steer, -1), 0, 0, 0, value(p.brake), value(p.throttle)] };
+}
 
 /** a real controller's snapshot with the touch controls' added (their buttons too, the stick further out of the
  *  two); without a real one, the touch controls are the controller */
@@ -287,6 +298,8 @@ export class PadPoller {
   // the touch controls' virtual controller (touch.ts), and the phone's vibration for the game's rumble without a
   // controller: when it last buzzed
   private touch: TouchPad | null = null;
+  private spatial: { pad: SpatialPad; at: number } | null = null;
+  private feedback: { value:SpatialFeedback; at:number } | null = null;
   private buzzAt = 0;
   // the controller driving the pad as it showed up (a wheel's layout comes from it)
   private seen: Seen | null = null;
@@ -345,7 +358,7 @@ export class PadPoller {
     removeEventListener('gamepadconnected', this.onConnect);
     removeEventListener('gamepaddisconnected', this.onDisconnect);
     removeEventListener(WHEEL_MAP_EVENT, this.onWheelMap);
-    this.rumble(null);
+    this.feedback=null;this.rumble(null);
     this.steam();
     this.h = null; this.u8 = null;
     this.localPads = null;
@@ -357,6 +370,8 @@ export class PadPoller {
 
   /** the touch controls' virtual controller, merged with a real one (null: none) */
   setTouch(t: TouchPad | null) { this.touch = t; this.poll(); }
+  setSpatial(pad: SpatialPad | null) { this.spatial = pad ? {pad: {...pad}, at: performance.now()} : null; this.poll(); }
+  setFeedback(value:SpatialFeedback|null) {this.feedback=value?{value:{...value},at:performance.now()}:null;}
 
   poll() {
     if (!this.h) return;
@@ -381,14 +396,16 @@ export class PadPoller {
       driver = g && { index: g.index, id: g.id };
       dispatchEvent(new Event(PAD_DRIVER_EVENT));
     }
-    const s: PadSnapshot = g ? this.read(g, pads) : { connected: false, buttons: 0, axes: [0, 0, 0, 0, 0, 0], family: PADF_GENERIC, name: '', index: -1 };
-    this.rumble(g);
+    const spatial = this.spatial && performance.now() - this.spatial.at < 250 && !globalThis.document?.hidden ? this.spatial.pad : null;
+    const s: PadSnapshot = spatial ? spatialSnapshot(spatial) : g ? this.read(g, pads) : { connected: false, buttons: 0, axes: [0, 0, 0, 0, 0, 0], family: PADF_GENERIC, name: '', index: -1 };
+    const feedback=this.feedback&&performance.now()-this.feedback.at<250&&!globalThis.document?.hidden?this.feedback.value:null;
+    this.rumble(spatial||feedback?.controllers?null:g,feedback);
     const pressed = s.buttons & ~this.pressedBefore;
     this.pressedBefore = s.buttons;
     if (pressed) { this.onPress(); this.lastPress = performance.now(); }
     if (pressed || s.axes.some((v, i) => Math.abs(v - this.usedAxes[i]) > 0.25)) { this.usedAxes = s.axes; this.onUse?.(); }
-    const both = this.touch ? withTouch(s, this.touch) : s;
-    if (this.touch && !g) this.buzz();
+    const both = this.touch && !spatial ? withTouch(s, this.touch) : s;
+    if (this.touch && !g && !spatial && !feedback?.controllers) this.buzz();
     const out = this.page ? this.forPage(both, pressed) : both;
     this.localPads?.poll(pads, this.readLocal, !!globalThis.document?.hidden || !!this.page?.dialog());
     if (this.same(out)) return;
@@ -580,22 +597,28 @@ export class PadPoller {
   }
 
   /** the game's motor levels onto this controller (every frame, from poll) */
-  private rumble(g: Gamepad | null) {
+  private rumble(g: Gamepad | null, feedback:SpatialFeedback|null=null) {
     const h = this.h;
     const va = g?.vibrationActuator;
     const can = !!va && typeof va.playEffect === 'function';
     // the touch controls rumble through the phone's vibration instead (buzz)
     const phone = !g && !!this.touch && typeof navigator.vibrate === 'function';
-    if (h && Atomics.load(h, IM_PAD_RUMBLE) !== (can || phone ? 1 : 0)) Atomics.store(h, IM_PAD_RUMBLE, can || phone ? 1 : 0);
+    const supported=feedback?.controllers?feedback.rumble:can||phone;
+    if (h && Atomics.load(h, IM_PAD_RUMBLE) !== (supported?1:0)) Atomics.store(h, IM_PAD_RUMBLE, supported?1:0);
     const now = performance.now();
     let strong = 0, weak = 0;
-    if (h && can) {
+    if (h) {
       const seq = Atomics.load(h, IM_RUMBLE_SEQ);
       if (seq !== this.rumbleSeq) { this.rumbleSeq = seq; this.rumbleSeen = now; }
       // levels the game still sends: it polls the pad every frame while it runs
-      if (now - this.rumbleSeen < 150 && document.visibilityState === 'visible') {
+      if (can && now - this.rumbleSeen < 150 && document.visibilityState === 'visible') {
         strong = Atomics.load(h, IM_RUMBLE_STRONG) / 65535; weak = Atomics.load(h, IM_RUMBLE_WEAK) / 65535;
       }
+    }
+    if(feedback) {
+      const bound=(v:number)=>Number.isFinite(v)?Math.max(0,Math.min(1,v)):0;
+      const road=bound(feedback.road),engine=bound(feedback.engine);
+      strong=weak=feedback.rumble&&!feedback.controllers&&can?road+(1-road)*engine:0;
     }
     const [ps, pw] = this.rumbleNow, playing = ps > 0 || pw > 0;
     if (strong < 0.02 && weak < 0.02) {

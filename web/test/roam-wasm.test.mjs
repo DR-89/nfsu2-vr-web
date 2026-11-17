@@ -13,16 +13,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {findWasi,execBuild} from '../tools/build-tools.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const WASI = fs.readdirSync(path.join(REPO, 'deps')).filter(d => d.startsWith('wasi-sdk-')).map(d => path.join(REPO, 'deps', d)).pop();
-const CC = WASI && path.join(WASI, 'bin/clang');
+const WASI = findWasi(REPO);
+const CC = WASI && `${WASI}/bin/clang`;
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
 // the game build's target and code generation (web/build.sh), roam_core with -ffp-contract=off as there
 const FLAGS = ['--target=wasm32-wasip1-threads', '-pthread', '-O3', '-msimd128', '-mbulk-memory', '-mnontrapping-fptoint',
   '-mtail-call', '-ffp-contract=off', '-Iruntime', '-Iruntime/web'];
 const LINK = ['-Wl,--import-memory,--export-memory,--shared-memory,--initial-memory=67108864,--max-memory=268435456', '-Wl,-z,stack-size=8388608'];   // an 8 MB stack as on the Mac: roam_unit keeps sessions on it
-const cc = (out, srcs) => execFileSync(CC, [...FLAGS, '-o', out, ...srcs, ...LINK], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+const cc = (out, srcs) => execBuild(CC, [...FLAGS, '-o', out, ...srcs, ...LINK], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const run = (wasm, ...args) => execFileSync(process.execPath, [path.join(REPO, 'web/test/wasi-run.mjs'), wasm, ...args], { encoding: 'utf8', timeout: 120_000 });
 
 test('roam_unit on wasm (core + web platform layer)', { skip: !CC && 'no wasi-sdk in deps/' }, () => {
@@ -48,7 +49,7 @@ test('plates_unit on wasm: license plates\' pictures and their HELLO (runtime/pl
 
 test('the pose log flushes only every 240 frames (roam_host.h buffer)', { skip: !CC && 'no wasi-sdk in deps/' }, () => {
   const w = path.join(OUT, 'poselog_unit.wasm');
-  execFileSync(CC, ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-include', 'runtime/web/compat/wasm_plat.h',
+  execBuild(CC, ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-include', 'runtime/web/compat/wasm_plat.h',
     '-Iruntime/web/compat', '-Iruntime', '-o', w, 'web/test/poselog_unit.c', ...LINK], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const dir = fs.mkdtempSync(path.join(OUT, 'poselog-'));
   try {

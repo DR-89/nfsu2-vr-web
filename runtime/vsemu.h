@@ -42,6 +42,7 @@ int  ps_to_msl(const VSProg *p, int id, char *out, size_t cap);
 int  ps_to_msl_ex(const VSProg *p, int id, char *out, size_t cap, unsigned cubemask);
 int  ps_to_msl_ex2(const VSProg *p, int id, char *out, size_t cap, unsigned cubemask, int reflk);
 int  ps_uses_colorout(const VSProg *p);
+unsigned ps_texture_stages(const VSProg *p); /* texture sampling instructions, not stale bound stages */
 
 /* Translate the vertex shader to MSL.  decl[i] = (byte offset, D3DDECLTYPE),
  * or offset < 0 if that input is unused.  The generated function is "vs_<id>". */

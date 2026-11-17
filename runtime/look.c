@@ -125,16 +125,21 @@ static int pad_log(void){
     return l;
 }
 
-/* the player's car while it drives with the drive camera and the HUD on top (0: no look now) */
-static uint32_t driving_car(void){
+/* An in-world player with its HUD on top, including crash/jump cameras.
+ * VR keeps these scenes in stereo; driving input still requires DRIVE. */
+uint32_t look_world_car(void){
     uint32_t pl = guest_rd32(G_PLAYER1), r = guest_rd32(G_RACE);
     if (MR32(G_FLOW) != 6u || !guest_ok(pl, PL_MOVER + 4u) || !guest_ok(r, 3) || MR32(r) != 4u) return 0;
     uint32_t car = guest_rd32(pl + PL_CAR), mv = guest_rd32(pl + PL_MOVER);
-    if (!guest_ok(car, CAR_POS + 12u) || !guest_ok(mv, MV_TYPE + 4u) || MR32(mv + MV_TYPE) != MOVER_DRIVE) return 0;
+    if (!guest_ok(car, CAR_POS + 12u) || !guest_ok(mv, MV_TYPE + 4u)) return 0;
     uint32_t hud = guest_rd32(pl + PL_HUD), fe = guest_rd32(G_FENG), mg = fe ? guest_rd32(fe + 8u) : 0, top = mg ? coop_fe_top(mg) : 0;
     char a[40], b[40];
     guest_read_str(top ? guest_rd32(top + 0xcu) : 0, a, sizeof a); guest_read_str(hud ? guest_rd32(hud + 0x10u) : 0, b, sizeof b);
     return a[0] && !strcasecmp(a, b) ? car : 0;
+}
+uint32_t look_driving_car(void){
+    uint32_t car=look_world_car(),mv=guest_rd32(guest_rd32(G_PLAYER1)+PL_MOVER);
+    return car && guest_rd32(mv+MV_TYPE)==MOVER_DRIVE ? car : 0;
 }
 
 /* how far the stick at x, y points from straight back (rad, 0 .. pi) */
@@ -168,7 +173,7 @@ int look_back_held(const PadState *s){
     int st = pad_look_stick();
     if (!L.back || !s || s->wheel || st < 0) return 0;
     float x = s->axis[st], y = s->axis[st + 1];
-    return hypotf(x, y) > SNAP_R_OFF && from_back(x, y) < SNAP_OUT && driving_car() != 0;
+    return hypotf(x, y) > SNAP_R_OFF && from_back(x, y) < SNAP_OUT && look_driving_car() != 0;
 }
 
 /* p (a point, or a direction with pt 0) turned as the view is: clockwise seen from above about the line */
@@ -238,7 +243,7 @@ void look_view(uint32_t id, uint32_t cam){
     float dt = L.t > 0. ? (float)(t - L.t) : 0.f;
     L.t = t;
     if (dt > 0.25f) dt = 0.25f;
-    uint32_t car = driving_car();
+    uint32_t car = look_driving_car();
     int back = 0;
     float want = stick_yaw(car != 0, &back);
     const char *which = pad_look_stick() == PAD_AXIS_LX ? "left" : "right";

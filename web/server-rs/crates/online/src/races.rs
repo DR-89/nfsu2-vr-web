@@ -124,6 +124,7 @@ impl Core {
                         name: p.name,
                         addr: p.addr,
                         vip: p.vip,
+                        avatar_connected: false,
                         flags: p.flags,
                         back: p.back,
                         reported: p.reported,

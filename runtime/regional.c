@@ -24,8 +24,10 @@
  * page's save check (web/src/app/profile.ts) has always counted both among
  * the game's cars. */
 #include "cpu.h"
+#include "game.h"
 #include "widescreen.h"           /* HOOK_SITE */
 #include <stdio.h>
+#include "setting.h"
 
 #define LOCKED_NA       0x007f7c48u   /* 2 car types region 0 does not sell */
 #define AI_CARS_NA      0x007f6da4u   /* region 0's AI car types, a byte each */
@@ -35,7 +37,23 @@
 
 static int g_on;
 
-void regional_install(void){
+#ifdef __wasm__
+static int regional_file(const char *path){
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f); return 1;
+}
+#endif
+
+static void regional_setup(int na, int eu, int enabled){
+    /* The supported NA executable can accompany European retail data. Keep
+     * that release's own selection even with the optional unlock disabled. */
+    if (eu && !na){
+        MR32(G_CAR_REGION) = 1;
+        fprintf(stderr, "[cars] European car data: using the original European car selection\n");
+        return;
+    }
+    if (!na || !eu || !enabled) return; /* absent geometry must never be selected */
     /* only on the data of the exe this port is made for */
     if (MR32(LOCKED_NA) != T_CORSA || MR32(LOCKED_NA + 4u) != T_PEUGOT106
         || MR8(AI_CARS_NA + AI_CARS_NA_N - 2u) != 5u || MR8(AI_CARS_NA + AI_CARS_NA_N - 1u) != 18u
@@ -47,6 +65,15 @@ void regional_install(void){
     MR8(AI_CARS_NA + AI_CARS_NA_N) = T_CORSA;
     MR8(AI_CARS_NA + AI_CARS_NA_N + 1u) = T_PEUGOT106;
     g_on = 1;
+}
+
+void regional_install(void){
+    int na=1,eu=1;
+#ifdef __wasm__
+    na=regional_file("/data/CARS/CIVIC/GEOMETRY.BIN") && regional_file("/data/CARS/RSX/GEOMETRY.BIN");
+    eu=regional_file("/data/CARS/CORSA/GEOMETRY.BIN") && regional_file("/data/CARS/PEUGOT106/GEOMETRY.BIN");
+#endif
+    regional_setup(na,eu,setting_bool("NFSU2_REGIONAL_CARS",0));
 }
 
 int regional_hook(CPU *c, uint32_t ip){

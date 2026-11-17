@@ -11,6 +11,7 @@ publish = false
 rust-version = "1.85"
 
 [workspace.dependencies]
+nfsu2-vr = { path = "crates/vr" }
 nfsu2-util = { path = "crates/util" }
 nfsu2-names = { path = "crates/names" }
 nfsu2-headers = { path = "crates/headers" }

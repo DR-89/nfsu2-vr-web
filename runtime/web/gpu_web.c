@@ -65,7 +65,9 @@ static int      g_detached;      /* the page never attached: dropped back to nul
 #define MAXKB  ( 4u * 1024u * 1024u)        /* VS constant arena (bytes) */
 #define RQ_CAP (64u * 1024u * 1024u)        /* resource queue ring (bytes, power of two) */
 #define KZERO  256u                         /* K arena bytes [0, 256): an all-zero block for TVert draws (base 0) */
-#define KFIRST 2048u                        /* [GW_K_HL, + GW_HL_BYTES): the frame's headlights; [GW_K_MARKS, + GW_MARKS_BYTES):
+#include "vr_web.h"
+_Static_assert(GW_K_VR + sizeof(VrFrame) <= 16384, "VR frame fits K arena");
+#define KFIRST 16384u                       /* [GW_K_HL, + GW_HL_BYTES): the frame's headlights; [GW_K_MARKS, + GW_MARKS_BYTES):
                                                quick chat's places; [GW_K_TONE, + GW_TONE_BYTES): Exposure and
                                                White Level; [GW_K_LAT, + GW_LAT_BYTES): input age;
                                                [GW_K_PHOTO, + GW_PHOTO_BYTES): photo mode's picture; the draws'
@@ -86,6 +88,15 @@ static Buf g_b[GW_NBUF];
 static int g_cur = 0;
 
 static unsigned g_cur_target = 0, g_cur_blend = 0, g_cur_bcol = 0xFFFFFFFFu, g_cur_cull = 3u;
+static unsigned g_cur_vr;
+void metal_set_vr_draw(int hud,int perspective){
+    g_cur_vr = (hud ? GW_VR_HUD : 0) | (perspective ? GW_VR_PERSPECTIVE : 0);
+}
+void metal_set_vr_driver(unsigned slot){g_cur_vr|=slot<<GW_VR_DRIVER_SHIFT;}
+static unsigned vr_flags(void){
+    int split_render_view(void);
+    return g_cur_vr | ((unsigned)split_render_view() & 15u) << GW_VR_VIEW_SHIFT;
+}
 static unsigned g_cur_depth = 1u << 8, g_cur_dmode = 0, g_cur_zid = 1;
 static unsigned g_cur_tex1, g_cur_tex2, g_cur_tex3;
 static int      g_cur_ps;
@@ -690,6 +701,7 @@ static void screen_wh(unsigned *w, unsigned *h){     /* as handoff's F->bb_w/h *
 }
 static uint32_t target_wh(void){
     if (!halfpx_on()) return 0;
+    if (g_cur_vr & GW_VR_HUD) return 1280u | 960u << 16;
     unsigned t = g_cur_target & 0xFFFFu, w = 0, h = 0;
     if (!t) screen_wh(&w, &h);
     else if (t < MAXTEX && g_tex[t].live){ w = g_tex[t].w; h = g_tex[t].h; }
@@ -718,6 +730,7 @@ static GwDraw *rec_draw(Buf *B, unsigned tex){
     GwDraw *D = &B->d[B->dn];
     memset(D, 0, sizeof *D);        /* slots are reused across frames (see metal.m's is_blit story) */
     D->kind = GW_DRAW; D->tex = tex; D->target = g_cur_target;
+    D->vr_flags = vr_flags();
     D->blit_src = g_hloff;
     uint32_t region[2]; int split_effect_region(uint32_t *);
     if (split_effect_region(region)){ D->clr_argb = region[0]; D->clr_flags = region[1]; }
@@ -803,7 +816,7 @@ static GwDraw *raw_merge(Buf *B, unsigned stride, unsigned tex, int vsid, const 
     uint32_t region[2] = {0, 0}; int split_effect_region(uint32_t *);
     split_effect_region(region);
     if (P->clr_argb != region[0] || P->clr_flags != region[1]) return NULL;
-    if (P->kind != GW_DRAW || P->vsid != vsid || P->ix_isz || P->koff != B->last_koff || P->ksz != 16u + nk * 16u
+    if (P->kind != GW_DRAW || P->vr_flags != vr_flags() || P->vsid != vsid || P->ix_isz || P->koff != B->last_koff || P->ksz != 16u + nk * 16u
         || B->last_vs != vsid || P->rawoff + P->count * stride != B->rvn || B->rvn + need > MAXRV) return NULL;
     const uint32_t *h = (const uint32_t *)(B->kb + P->koff);
     uint32_t tsel = 0;
@@ -964,6 +977,9 @@ void metal_screen_metrics(double *backing, double *panel){
 }
 
 /* ---- display clock --------------------------------------------------------- */
+int metal_display_immersive(void){
+    return g_vs && __atomic_load_n(&g_vs->visible, __ATOMIC_RELAXED) == 2;
+}
 int metal_display_hz(void){
     gw_init();
     int hz = g_vs ? __atomic_load_n(&g_vs->hz, __ATOMIC_RELAXED) : 0;
@@ -1056,6 +1072,7 @@ static int      g_handed = 0;     /* the frame being recorded went to the page e
 static void handoff(uint32_t rb_id, uint32_t rb_tex, uint32_t rb_dst, uint32_t rb_pitch, uint32_t rb_rows){
     Buf *B = &g_b[g_cur];
     GwFrame *F = &g_ctl->frame[g_cur];
+    vr_web_present(B->kb + GW_K_VR);
     F->seq = g_gframe; F->dn = B->dn; F->vn = B->vn; F->rvn = B->rvn; F->kn = B->kn; F->pscn = B->pscn;
     F->draws = (uint32_t)(uintptr_t)B->d; F->tv = (uint32_t)(uintptr_t)B->v; F->raw = (uint32_t)(uintptr_t)B->rv;
     F->k = (uint32_t)(uintptr_t)B->kb; F->psc = (uint32_t)(uintptr_t)B->psc;

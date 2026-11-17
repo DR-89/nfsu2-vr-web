@@ -4,12 +4,82 @@ What changed for players, newest first: the start page's Changelog button shows 
 into /changelog.json).
 
 Each day with a release gets one section, written when its module is built: `## <date> (<commit>)`, the commit being
-the last one the day's releases bring, so the next section covers the commits after it. A second release on the same
+the last one the day's releases bring, so the next section covers the commits after it. Source bundles from a working checkout omit the commit; their bundle.json records the shipped file hashes. A second release on the same
 day adds its lines to that day's section and moves its commit on (web/build.mjs stops on a date twice). One line per
 change, in plain text, as `- **Area:** what changed`, written for players: new things and noticeable improvements
 first, then under `### Fixes` what was broken and works now, which the popup keeps folded. Left out: the server's
 insides, the forum bot, logs, tests, docs and cheat checks. A change that may or may not belong here is asked about
 before the release, not guessed.
+
+## 2026-11-15
+
+### Fixes
+
+- **VR vibration:** engine vibration blends with bumps, collisions and gear changes. Both controllers receive engine feedback by default, including when steering with the thumbstick. Turn off Engine feedback near controls in an existing profile to use this behavior.
+- **VR controls:** thumbsticks respond to short menu presses and world prompts. The right stick opens nearby interactions with up or right, career status with down, and messages with left.
+- **VR camera:** leaving VR and entering it again returns to the cockpit during a race or free roam. Brief tracking interruptions keep the camera view you selected.
+
+## 2026-11-14
+
+- **Custom music:** local songs and cockpit videos play in random order by default, with every file played once before the next shuffle. Previous returns to the last played track.
+- **PCVR vibration:** the start page offers a Windows helper with setup instructions and a connection status. After one-time setup it starts with Windows, so the normal website works in your usual Chrome or Edge profile without a separate game starter.
+- **PCVR performance:** both eyes reuse more frame data, and Virtual Desktop presentation reuses its texture storage between frames.
+- **VR shifting:** the active shifter zone defaults to a 10 cm radius. Saved custom radii are kept.
+- **VR steering:** hands grip the wheel automatically when held near its rim and release when moved away. Require grip for steering restores holding the controller's grip button; the website and in-game VR setting saves with your profile.
+- **Cockpit LEDs:** shift light cues are off by default. Enable Shift light cues in the website or in-game VR settings to show shifter-zone colours and gear-change flashes.
+- **Headset resolution:** the website shows the measured render dimensions in pixels per eye. The last measurement stays on this device; changing the percentage previews an estimated size for the next VR start.
+
+### Fixes
+
+- **PCVR vibration:** the Windows helper can load inside Chrome and Edge's protected VR process, with a dedicated local data channel. The website distinguishes an installed helper from a loaded VR connection and flags older helper versions.
+- **Cockpit rain:** removed camera droplets that covered the interior and hands. Rain outside the car and wet roads remain visible.
+- **Cockpit videos:** local videos start without waiting for browser audio approval. Video-only folders no longer get blocked by a remembered music-only choice, and interrupted playback can resume.
+- **Cockpit controls:** removed the pointer circle from the monitor. Fingertip and trigger input share one press; trigger jitter, sideways movement and tracking interruptions no longer cause a second click.
+
+- **VR shifting:** holding the accelerator through a manual shift no longer loses throttle when the hand points across the cockpit screen. A held pedal cannot become a media click; release it before clicking the screen.
+
+- **VR lights:** removed the accumulated light-streak effect that leaves floating or doubled light spots when moving your head. Current-frame lights and surface reflections remain; monitor play keeps its graphics setting.
+
+- **VR image clarity:** full-screen graphics effects keep the eye render resolution instead of reducing the world to the browser window size. Values above 100% supersample the scene even when the headset browser caps its output layer.
+
+- **Quest browser:** a visible VR session keeps the game active even when the browser window loses focus, fixing a stall at the startup loading screen. Opening the headset system menu pauses the game; returning resumes it. Standalone Quest uses mobile memory and graphics defaults instead of desktop allocations.
+
+## 2026-11-13
+
+- **Local music and videos:** the remembered media folder reopens automatically when access is allowed. If the browser needs permission again, use Allow folder access without choosing the folder again. Files stay on your device; browsers that cannot keep the folder show a notice.
+- **VR settings:** a visible scrollbar shows your position and how much of the settings list remains, with arrows indicating more options above or below.
+- **Cockpit media:** volume, a seek bar and elapsed/total time are on the screen, usable with the mouse, controller ray or fingertip. Seeking supports local videos and music, including custom game-radio tracks. The duplicate controls below the screen are removed.
+- **PCVR responsiveness:** game frames can render between headset callbacks. Cached eye images follow new head rotations, and the separate desktop spectator updates at 30 Hz to leave more time for the headset.
+- **PCVR performance:** less rendering work and fewer graphics transfers for the two eyes, without reducing the selected resolution. The monitor view reuses an eye image while VR is active, and matching reflections are calculated once for both eyes.
+- **VR frame rate:** Auto follows 72, 80 and 90 Hz headsets as well as 120 Hz. Selecting 120 FPS also requests 120 Hz from supported headsets; an existing 120 Hz headset setting is preserved.
+
+### Fixes
+
+- **VR scenery:** the wider headset lens no longer shortens scenery detail distances. Cockpit mirrors retain distant scenery and show world objects omitted by the original small rear-view display.
+- **VR crash camera:** crashes and jumps remain in 3D with their original camera framing; returning to driving restores the chosen cockpit view.
+- **VR:** missed headset frames no longer lower the game's automatic target frame rate.
+- **Cockpit:** cabin, steering wheel and gloves use the Xbox VR mod's darker material and lighting. LED strips and screens remain illuminated.
+- **Hands:** free and shifter hands use the Xbox VR mod's controller orientation, including pointing and the hands other players see.
+
+## 2026-11-10
+
+- **nfsu2-vr-web:** a dedicated VR start button, with monitor play still available in the same game.
+- **Cockpit:** fitted interiors inside the original car body, tracked hands, working instruments, adjustable mirrors and a movable minimap.
+- **Controls:** grabbable steering with a deadzone, H-pattern and reversible sequential shifting, optional wrist gestures and engine/shift haptics.
+- **Media:** choose a local music/video folder; switch between media and live telemetry directly in the cockpit. Move, rotate, resize and fade the screen.
+- **Interior lights:** selectable LED colours, music pulse, shifter-zone feedback and red/blue shift flashes, with a cockpit colour button.
+- **Multiplayer:** visible cockpits, helmet heads and hands in free roam, LAN and Online races; both local co-op seats have separate driver poses.
+- **Settings:** shared website and controller menus, saved VR preferences in cloud profiles, and in-cockpit race and connection selection.
+
+### Fixes
+
+- **Cockpit screen:** a screen moved in front of the steering wheel stays in front, with correct depth and opacity.
+
+- **Mirrors:** removed interior self-reflections; mirrors show the road and traffic. Adjusting the centre mirror no longer moves the side-mirror capture.
+
+- **Multiplayer:** each split-screen view uses its own camera; a shared driver replaces the original flat driver model only while its head is visible.
+- **VR:** original bodywork stays around the cockpit, and both CPU and GPU rendering paths receive the correct stereo transform.
+- **Mirrors:** depth edges no longer create scattered fragments and false surfaces in the reflected view.
 
 ## 2026-11-08 (314555b)
 

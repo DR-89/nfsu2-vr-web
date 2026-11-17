@@ -245,6 +245,9 @@ impl LanSwitch {
             }
             self.stats.line_in.inc();
             let (peer, count) = self.seat(&mut m, &conn, &ctx, hello, vip, old);
+            if resumed && let Some(h) = &self.online {
+                h.peer_resumed(vip);
+            }
             if let Some(t) = ticket {
                 m.line.seated.insert(t, (peer.vip, peer.token_hash, now_ms() + self.o.reserve_ms));
             }

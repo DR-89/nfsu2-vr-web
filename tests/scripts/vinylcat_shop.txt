@@ -1,3 +1,4 @@
+# Requires NFSU2_SPECIAL_VINYLS=1 for the Special category and category offsets below.
 # The vinyls' hidden category (runtime/vinylcat.c) in a career Graphics shop, as the player sees it: a career save
 # (stage 2 or later, roam on in its own room for "mp parts"), CC_GRAPHICS, Vinyls, the bottom layer, the categories
 # stepped through to the last, Special (vc_cats_last; vc_cats_sponsor one before), into it (vc_list: STREET REAPER

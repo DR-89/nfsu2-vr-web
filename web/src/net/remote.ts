@@ -17,16 +17,17 @@
 //
 // When no worker starts (an error loading it, nothing from it in READY_MS) the link runs on the page as before
 // (attachNet), and the calls made meanwhile are made there.
+import type { ModRequest } from '../vr/protocol';
 import type { GameProcess } from '../host/process';
 import { HostKind } from '../host/abi';
-import { attachNet, type NetLink, type NetOptions, type NetPeer, type NetState, type NetStats } from './index';
+import { attachNet, type NetLink, type NetOptions, type NetPeer, type NetState, type NetStats, type NetProfile } from './index';
 
 /** NetOptions' callbacks: the worker sends the page each call of those the page gave */
 export const CALLBACKS = ['log', 'onPeers', 'onNotice', 'onLobby', 'onSay', 'onBump', 'onBattle', 'onCoop', 'onFriend', 'onBack', 'onQueue',
-  'onRemoved', 'onRaces', 'onRename', 'onAttached'] as const;
+  'onRemoved', 'onRaces', 'onRename', 'onAttached', 'onMod'] as const;
 export type NetCallback = typeof CALLBACKS[number];
 /** NetLink's calls, made in the worker */
-export type NetCall = 'setAway' | 'goOffline' | 'rename' | 'setSolid' | 'say' | 'friend' | 'setCrews' | 'setRoom' | 'close';
+export type NetCall = 'setAway' | 'goOffline' | 'rename' | 'setSolid' | 'say' | 'friend' | 'setCrews' | 'setRoom' | 'mod' | 'close' | 'profile';
 /** the link as the worker last saw it (its peer list only when that changed: worker.ts PEERS_MS) */
 export interface NetNow { state: NetState; vip: string | null; peers?: NetPeer[]; roam: boolean; lan: boolean; stats: NetStats }
 /** NetOptions without its callbacks (what can go to the worker) */
@@ -37,8 +38,9 @@ export type ToNet =
   | { t: 'mem'; buf: SharedArrayBuffer }
   | { t: 'reg'; kind: number; ptr: number; size: number }
   | { t: 'exit' }
-  | { t: 'call'; m: NetCall; a: unknown[] };
+  | { t: 'call'; m: NetCall; a: unknown[]; id?:number };
 export type FromNet =
+  | {t:'profile';id:number;accepted:boolean;now:NetNow}
   | { t: 'ready' }
   | { t: 'fail'; why: string }
   | { t: 'now'; now: NetNow }
@@ -67,7 +69,9 @@ class RemoteLink implements NetLink {
   /** the link on the page instead (no worker started) */
   private direct: NetLink | null = null;
   /** the calls made before the worker said it runs: made again on the page when it never does */
-  private early: { m: NetCall; a: unknown[] }[] = [];
+  private early: { m: NetCall; a: unknown[];id?:number }[] = [];
+  private profileSeq=0;
+  private profiles=new Map<number,(ok:boolean)=>void>();
   private readyTimer: ReturnType<typeof setTimeout> | null = null;
   private closed = false;
 
@@ -76,7 +80,7 @@ class RemoteLink implements NetLink {
     w.onmessage = (e: MessageEvent<FromNet>) => this.heard(e.data);
     w.onerror = (e) => {
       if (!this.ready) { e.preventDefault(); this.onPage(e.message || 'it could not load'); }
-      else this.o.log?.(`[net] the network's worker: ${e.message}`);
+      else {this.o.log?.(`[net] the network's worker: ${e.message}`);if(this.profiles.size)this.close();}
     };
     this.readyTimer = setTimeout(() => this.onPage(`nothing from it in ${READY_MS / 1000} s`), READY_MS);
     const plain: Record<string, unknown> = {};
@@ -91,7 +95,7 @@ class RemoteLink implements NetLink {
 
   private post(m: ToNet) { if (!this.direct) this.w.postMessage(m); }
   private heard(m: FromNet) {
-    if (this.direct) return;
+    if (this.direct || this.closed) return;
     if (m.t === 'ready') {
       this.ready = true; this.early = [];
       if (this.readyTimer) { clearTimeout(this.readyTimer); this.readyTimer = null; }
@@ -101,7 +105,8 @@ class RemoteLink implements NetLink {
     if (m.t === 'fail') { this.onPage(m.why); return; }
     this.now = m.now;
     if (m.now.peers) this.peerList = m.now.peers;
-    if (m.t === 'online') this.resolveOnline(m.vip);
+    if(m.t==='profile'){this.profiles.get(m.id)?.(m.accepted);this.profiles.delete(m.id);}
+    else if (m.t === 'online') this.resolveOnline(m.vip);
     else if (m.t === 'cb') (this.o[m.k] as ((...a: unknown[]) => void) | undefined)?.(...m.a);
   }
   /** no worker: the link on the page, as attachNet makes it, with the calls made so far */
@@ -112,7 +117,10 @@ class RemoteLink implements NetLink {
     if (this.closed) return;
     this.o.log?.(`[net] no worker for the link (${why}): it runs on the page`);
     const d = this.direct = attachNet(this.proc, this.o);
-    for (const { m, a } of this.early) (d[m] as (...a: unknown[]) => unknown)(...a);
+    for (const { m, a, id } of this.early){
+      const result=(d[m] as (...a: unknown[]) => unknown)(...a);
+      if(id!==undefined)void Promise.resolve(result).then(ok=>{this.profiles.get(id)?.(ok===true);this.profiles.delete(id);});
+    }
     this.early = [];
     void d.online.then(v => this.resolveOnline(v));
   }
@@ -120,13 +128,26 @@ class RemoteLink implements NetLink {
   private ended() {
     if (this.closed) return;
     this.closed = true;
+    for(const resolve of this.profiles.values())resolve(false);this.profiles.clear();this.early=[];
     if (this.readyTimer) { clearTimeout(this.readyTimer); this.readyTimer = null; }
-    this.now = { ...this.now, state: 'closed' };
+    this.now = { ...this.now, state: 'closed',vip:null,stats:{...this.now.stats,state:'closed',vip:null} };
+    this.peerList=[];
     if (!this.direct) { const w = this.w; setTimeout(() => w.terminate(), END_MS); }
   }
-  private call(m: NetCall, a: unknown[]) {
-    if (!this.ready) this.early.push({ m, a });
-    this.post({ t: 'call', m, a });
+  private call(m: NetCall, a: unknown[],id?:number) {
+    if (!this.ready) this.early.push({ m, a, id });
+    this.post({ t: 'call', m, a, id });
+  }
+
+  profile(profile:NetProfile|null):Promise<boolean>{
+    if(this.closed)return Promise.resolve(false);
+    if(this.direct)return this.direct.profile(profile);
+    const id=++this.profileSeq;return new Promise(resolve=>{
+      // An unresponsive worker must not hold the profile editor forever or
+      // complete an old switch after the player tries another profile.
+      const timer=setTimeout(()=>this.close(),30_000);
+      this.profiles.set(id,ok=>{clearTimeout(timer);resolve(ok);});this.call('profile',[profile],id);
+    });
   }
 
   get state(): NetState { return this.direct ? this.direct.state : this.now.state; }
@@ -141,6 +162,11 @@ class RemoteLink implements NetLink {
     if (this.direct) return this.direct.say(p, race);
     this.call('say', [p, race]);
     return race ? this.now.lan : this.now.roam;
+  }
+  mod(m: ModRequest): boolean {
+    if (this.direct) return this.direct.mod(m);
+    if (this.now.state !== 'online') return false;
+    this.call('mod', [m]); return true;
   }
   friend(m: Record<string, unknown>): boolean {
     if (this.direct) return this.direct.friend(m);

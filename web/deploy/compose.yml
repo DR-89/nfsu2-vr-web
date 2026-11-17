@@ -10,7 +10,7 @@
 #   NFSU2_HOST=game.example.com      the name players open (one name); its DNS record points at this VPS
 #   NFSU2_DATA=/srv/nfsu2/game       your NFS Underground 2 folder (default ./game), readable by everyone
 #   NFSU2_MODULE=/srv/nfsu2/module   nfsu2.wasm and nfsu2.json from web/build.sh (default ./module)
-#   NFSU2_IMAGE=<image>              the server's image (default ghcr.io/th0mk/nfsu2-web-rs:latest)
+#   NFSU2_IMAGE=<image>              the server's image (required: your built nfsu2-vr-web image)
 #   NFSU2_HTTP_PORT=8080             the server's port on 127.0.0.1, if 8080 is taken on the VPS
 #   NFSU2_THREADS=12                 the Rust image's worker threads (12 when not set; the image alone takes half
 #                                    the cores, 2 to 8); with more than about 3000 players in free roam, 8
@@ -21,7 +21,7 @@
 # Port 80 taken by something else on the VPS: compose.443.yml.  A Cloudflare Tunnel instead of Caddy:
 # compose.tunnel.yml.  Cloudflare's proxy (orange cloud) in front of Caddy: compose.cloudflare.yml.  Cloudflare's
 # proxy straight to the server (no Caddy, no tunnel): compose.origin.yml.
-name: nfsu2-web
+name: nfsu2-vr-web
 services:
   caddy:
     image: caddy:2.11-alpine
@@ -32,7 +32,7 @@ services:
     cgroup_parent: ${NFSU2_SLICE:-nfsu2.slice}
     logging: { driver: local }
   server:
-    image: ${NFSU2_IMAGE:-ghcr.io/th0mk/nfsu2-web-rs:latest}
+    image: ${NFSU2_IMAGE:?Set NFSU2_IMAGE to your nfsu2-vr-web image}
     restart: unless-stopped
     network_mode: host
     command: ["--behind-proxy"]
@@ -57,7 +57,7 @@ services:
       - ${NFSU2_DATA:-./game}:/game:ro
       - ${NFSU2_MODULE:-./module}:/module:ro
       - state:/state
-    # what the systemd unit (nfsu2-web.service) allows the server, as far as a container goes: nothing to write
+    # what the systemd unit (nfsu2-vr-web.service) allows the server, as far as a container goes: nothing to write
     # but its state, no capabilities, no swap, 262144 open files (the Rust image's 24000 players take up to 192000
     # connections, 8 each, and 131072 left too few for its files besides); 16 GB of memory (about half a GB a thousand
     # players: 4.9 GB at 13,163 on nfsu2.xyz, 2026-11-05), not the unit's 3 GB

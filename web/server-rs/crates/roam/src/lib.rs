@@ -382,6 +382,7 @@ enum Cmd {
     PageName(u32, String),
     OtherNames(oneshot::Sender<HashMap<u32, Vec<String>>>),
     Pairs(oneshot::Sender<Vec<(u32, u32)>>),
+    AvatarLinks(Vec<u32>, oneshot::Sender<nfsu2_util::host::AvatarLinks>),
     Friends(u32, Arc<str>, Vec<Arc<str>>),
     RoomName(u32, String),
     Flew(u32, f64),
@@ -624,6 +625,9 @@ fn run(
             Cmd::Pairs(tx) => guard(|| {
                 let _ = tx.send(hub.link_pairs());
             }),
+            Cmd::AvatarLinks(vips, tx) => guard(|| {
+                let _ = tx.send(hub.avatar_links(&vips));
+            }),
             Cmd::Friends(vip, me, owners) => guard(|| hub.friends(vip, me, owners)),
             Cmd::RoomName(vip, name) => guard(|| hub.room_name(vip, name)),
             Cmd::Flew(vip, secs) => guard(|| hub.flew(vip, secs)),
@@ -699,6 +703,11 @@ impl Host for RoamHub {
     }
     fn stop(&self) {
         let _ = self.tx.send(Cmd::Stop);
+    }
+    fn avatar_links(&self, vips: Vec<u32>) -> oneshot::Receiver<nfsu2_util::host::AvatarLinks> {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.tx.send(Cmd::AvatarLinks(vips, tx));
+        rx
     }
 }
 

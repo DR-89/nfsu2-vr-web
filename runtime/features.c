@@ -46,6 +46,7 @@ static const struct { const char *name; void (*install)(void); unsigned builds; 
 
 /* ---- instruction hooks: the first that takes the address ends the chain -- */
 static const struct { const char *name; int (*hook)(CPU *c, uint32_t ip); } k_hooks[] = {
+    { "raceactions", raceactions_hook },   /* broad search only while the race menu builds its request */
     { "splitscreen", splitscreen_hook },   /* split screen's views, maps and HUDs */
     { "coop",        coop_hook },          /* co-op: player 2 in the career's races */
     { "widescreen",  ws_hook },            /* the projection on screens wider or narrower than 4:3 */
@@ -121,6 +122,12 @@ int features_hook(CPU *c, uint32_t ip){
     return 0;
 }
 void features_frame(CPU *c){
+#ifdef __wasm__
+    void vr_web_frame(CPU *);
+    vr_web_frame(c);
+    void racebrowser_web_frame(CPU *);
+    racebrowser_web_frame(c);
+#endif
     for (size_t i = 0; i < COUNT(k_frames); i++)
         if (k_frames[i].frame) k_frames[i].frame(c);
 }

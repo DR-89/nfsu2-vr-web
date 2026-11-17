@@ -13,6 +13,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const load = async f => await import('data:text/javascript;base64,' + Buffer.from(
   (await esbuild.build({ entryPoints: [path.join(ROOT, f)], bundle: true, format: 'esm', write: false })).outputFiles[0].text).toString('base64'));
 const { Radio } = await load('web/src/radio.ts');
+const { ShuffleOrder } = await load('web/src/radio-order.ts');
 const { plaqueTags, gameText, tagsOf } = await load('web/src/radio-tags.ts');
 const { pickMusic, keptFolder } = await load('web/src/radio-folder.ts');
 const { RadioLink, RADIO_WORDS, RADIO_MAGIC, RADIO_VERSION } = await load('web/src/app/radio-link.ts');
@@ -38,6 +39,8 @@ function setup(names, decode = async () => pcm(RING * 2)) {
   const w = new Int32Array(memory.buffer, CTL, RADIO_WORDS.length), log = [];
   w[W.ring] = 0x8000; w[W.ring_frames] = RING;
   const radio = new Radio(() => new RadioLink(memory, 0), l => log.push(l));
+  // Stream tests opt into folder order; the default and shuffled rounds have their own cases.
+  radio.setShuffle(false);
   radio.setFolder({ files: names.map(handle), name: 'Music' });
   const game = async (place, seq) => { w[W.req_index] = place; w[W.req_seq] = seq; mock.timers.tick(50); await settle(); };
   const started = async () => { await radio.start(); await settle(); };
@@ -83,13 +86,59 @@ test('each place is offered the first track with its three lines, the switch is 
   s.radio.stop(); assert.equal(s.w[W.on] & 1, 0);
 });
 
-test('a song is served from the queue of its place, the next track is offered, and a track is let go of when its last frame is in', async () => {
+test('browser media silences EA Trax in both places, cancels folder decoding and survives the next game', async () => {
+  let finish;
+  const s = setup(['song.mp3'], () => new Promise(resolve => { finish = resolve; }));
+  await s.started(); await s.game(0, 1);
+  s.radio.setExternalPlayback(true); finish(pcm(256)); await settle();
+  assert.equal(s.radio.on, false);
+  assert.equal(s.w[W.on] & 1, 1); assert.equal(s.w[W.places], 0);
+  assert.equal(s.w[W.ready_seq], 0, 'old audio decode cannot overwrite the external player');
+  s.radio.stop('game ended'); assert.equal(s.w[W.on] & 1, 0);
+  await s.radio.resume(); assert.equal(s.w[W.on] & 1, 1); assert.equal(s.w[W.places], 0);
+  s.radio.setExternalPlayback(false); assert.equal(s.w[W.on] & 1, 0);
+  await s.radio.start(); assert.equal(s.w[W.places], 3);
+  s.radio.stop();
+});
+
+test('music source switches cancel pending folder reads without losing the saved Radio choice',async()=>{
+  const old=globalThis.localStorage,kept=storage();let finish;const s=setup(['one.mp3'],()=>new Promise(resolve=>finish=resolve));
+  try{
+    s.radio.enableForNextGame();await settle();await s.game(1,1);assert.equal(s.radio.on,true);
+    const saved={...kept};s.radio.pauseForSource(true,false);finish(pcm(64));await settle();
+    assert.equal(s.radio.on,false);assert.equal(s.w[W.on]&1,0);assert.equal(s.w[W.ready_seq],0);
+    assert.deepEqual(kept,saved);await s.radio.resume();assert.equal(s.w[W.on]&1,0,'EA TRAX retains ownership');
+    s.radio.pauseForSource(false,false);await settle();assert.equal(s.radio.on,true);assert.equal(s.w[W.places],3);
+    s.radio.clearSource();assert.equal(s.w[W.on]&1,0);assert.deepEqual(kept,saved);
+  }finally{s.radio.clearSource();if(old===undefined)delete globalThis.localStorage;else globalThis.localStorage=old;}
+});
+
+test('custom-only menus are silent across media changes and repeated context updates',async()=>{
+  const s=setup([]);s.radio.pauseForSource(true,true);assert.equal(s.w[W.on]&1,1);assert.equal(s.w[W.places],0);
+  const seq=s.w[W.on];s.radio.pauseForSource(true,true);assert.equal(s.w[W.on],seq);
+  s.radio.setExternalPlayback(true);assert.equal(s.w[W.on]&1,1);s.radio.setExternalPlayback(false);assert.equal(s.w[W.on]&1,1);
+  s.radio.pauseForSource(true,false);assert.equal(s.w[W.on]&1,0);
+  await s.radio.start();assert.equal(s.w[W.on]&1,0);
+  s.radio.clearSource();assert.equal(s.w[W.on]&1,0);
+});
+
+test('explicit custom-only starts an available folder without changing its saved switch; failed files fall back',async()=>{
+  const old=globalThis.localStorage,kept=storage(),s=setup(['one.mp3'],async()=>{throw Error('not audio');});
+  try{
+    assert.equal(s.radio.usable,true);s.radio.pauseForSource(true,true,true);s.radio.pauseForSource(false,false,true);await settle();
+    assert.equal(s.radio.on,true);await s.game(1,1);assert.equal(s.radio.on,false);assert.equal(s.radio.usable,false);assert.equal(s.w[W.on]&1,0);
+    s.radio.pauseForSource(false,false,true);await settle();assert.equal(s.radio.on,false,'failed media does not retry every frame');
+    assert.equal(Object.values(kept).includes('1'),false,'source choice does not enable the remembered Radio switch');
+  }finally{s.radio.clearSource();if(old===undefined)delete globalThis.localStorage;else globalThis.localStorage=old;}
+});
+
+test('a song is served from the queue of its place, the next track is offered, and the current decoded track stays seekable after its last frame is queued', async () => {
   const s = setup(['a.mp3', 'b.mp3', 'c.mp3']);
   await s.started();
   await s.game(0, 1);
   assert.deepEqual([s.w[W.ready_seq], s.w[W.written], text(s.memory, 0, 1), text(s.memory, 1, 1)], [1, RING, 'b', 'a']);
   s.w[W.read] = RING; await s.game(0, 1);
-  assert.deepEqual([s.radio.song, s.w[W.written]], [null, RING * 2]);
+  assert.deepEqual([s.radio.song.at, s.w[W.written]], [RING * 2, RING * 2]);
 });
 
 test('songs that change quickly decode one track at a time: the one under way, then only the latest', async () => {
@@ -105,6 +154,34 @@ test('songs that change quickly decode one track at a time: the one under way, t
   assert.deepEqual([done.length, s.w[W.ready_seq]], [1, 0]);
   done.shift()(); await settle();
   assert.deepEqual([most, decodes, s.w[W.ready_seq], s.radio.song?.at], [1, 2, 3, RING]);
+});
+
+test('folder seek waits for both readers, refills from the target, and rejects a changed track',async()=>{
+  const s=setup(['a.mp3','b.mp3']);s.w[W.radio_version]=RADIO_VERSION;
+  const seek=new Uint32Array(s.memory.buffer,TEXT+9*TAG+64+512*4,5);
+  await s.started();await s.game(1,1);
+  const track=s.radio.timeline;assert.ok(track.seekable);
+  assert.equal(s.radio.seek(.1,track.id),true);assert.equal(s.radio.seek(.05,track.id),false);
+  const written=s.w[W.written];await s.game(1,1);assert.equal(s.w[W.written],written,'no producer writes before the freeze acknowledgment');
+  seek[3]=seek[0];s.w[W.read]=4410;await s.game(1,1);
+  assert.equal(seek[4],seek[0]);assert.equal(s.w[W.written],RING*2);assert.equal(s.radio.song.at,RING*2);
+  assert.equal(s.radio.timeline.current,.1);
+  await s.game(1,2);assert.equal(s.radio.seek(.05,track.id),false);assert.equal(s.radio.seek(NaN,s.radio.timeline.id),false);
+  s.radio.stop();assert.equal(s.radio.timeline,null);
+});
+
+test('cockpit previous and next follow the folder playlist and skip tracks disabled for this place',async()=>{
+  const previousStorage=globalThis.localStorage;storage();const s=setup(['a.mp3','b.mp3','c.mp3','d.mp3']);
+  try{
+  s.w[W.radio_magic]=RADIO_MAGIC;s.w[W.radio_version]=RADIO_VERSION;
+  const link=new RadioLink(s.memory,0);link.cockpit(true,1);
+  s.radio.setMode('a.mp3','off');s.radio.setMode('d.mp3','menu');
+  await s.started();await s.game(1,1);await s.game(1,2);
+  await s.radio.stepTrack(-1);assert.equal(text(s.memory,1,1),'b');
+  await s.game(1,3);assert.equal(s.radio.playing.index,1);
+  await s.radio.stepTrack(1);assert.equal(text(s.memory,1,1),'c');
+  await s.game(1,4);assert.equal(s.radio.playing.index,2);
+  }finally{s.radio.stop();if(previousStorage===undefined)delete globalThis.localStorage;else globalThis.localStorage=previousStorage;}
 });
 
 test('a broken track gives way to the next; when every track is broken the game is told once and the radio goes off', async () => {
@@ -270,23 +347,71 @@ test('each place goes on from where it stopped: kept by path, a path not in the 
   }
 });
 
-test('Shuffle plays any track that suits the place but the last one, is kept, and off goes back to the queue', async () => {
+test('Shuffle is the default, while an explicit saved choice of folder order is kept', () => {
+  try {
+    storage({}); assert.equal(new Radio(() => null).shuffle, true);
+    storage({ 'nfsu2.radio.shuffle': '1' }); assert.equal(new Radio(() => null).shuffle, true);
+    storage({ 'nfsu2.radio.shuffle': '0' }); assert.equal(new Radio(() => null).shuffle, false);
+  } finally { storage(); }
+});
+
+test('Shuffle keeps separate rounds for menus and driving, persists, and off resumes folder order', async () => {
   const kept = storage();
   const random = Math.random;
-  Math.random = () => 0.99;
+  Math.random = () => 0;
   try {
     const s = setup(['a.mp3', 'b.mp3', 'c.mp3']);
     s.radio.setMode('b.mp3', 'racing');
     s.radio.setShuffle(true);
-    assert.deepEqual([kept['nfsu2.radio.shuffle'], setup([]).radio.shuffle], ['1', true]);
+    assert.deepEqual([kept['nfsu2.radio.shuffle'], new Radio(() => null).shuffle], ['1', true]);
     await s.started();
-    assert.deepEqual([text(s.memory, 0, 1), text(s.memory, 1, 1)], ['c', 'c']);
+    assert.deepEqual([text(s.memory, 0, 1), text(s.memory, 1, 1)], ['c', 'b']);
     await s.game(0, 1);
-    assert.deepEqual([text(s.memory, 0, 1), text(s.memory, 1, 1)], ['a', 'c']);
+    assert.deepEqual([text(s.memory, 0, 1), text(s.memory, 1, 1)], ['a', 'b']);
     s.radio.setShuffle(false); await settle();
     assert.deepEqual([kept['nfsu2.radio.shuffle'], text(s.memory, 0, 1), text(s.memory, 1, 1)], ['0', 'a', 'a']);
     s.radio.stop();
   } finally { Math.random = random; }
+});
+
+test('shuffled cockpit Next sends one command and Previous retraces playback without consuming the next song', async () => {
+  storage({}); const s=setup(['a.mp3','b.mp3','c.mp3','d.mp3']);s.radio.setShuffle(true);
+  try {
+    s.w[W.radio_version]=RADIO_VERSION;new RadioLink(s.memory,0).cockpit(true,1);
+    const commands=new Int32Array(s.memory.buffer,TEXT+9*TAG,16),heard=[];
+    await s.started();await s.game(1,1);heard.push(s.radio.playing.index);
+    for(let seq=2;seq<=4;seq++){
+      const before=commands[2];await s.radio.stepTrack(1);assert.equal(commands[2],before+1);
+      await s.game(1,seq);heard.push(s.radio.playing.index);
+    }
+    assert.equal(new Set(heard).size,4,'all songs play before a repeat');
+    const offered=text(s.memory,1,1);
+    await s.radio.stepTrack(-1);await s.game(1,5);assert.equal(s.radio.playing.index,heard[2]);
+    await s.radio.stepTrack(1);await s.game(1,6);assert.equal(s.radio.playing.index,heard[3]);
+    assert.equal(text(s.memory,1,1),offered,'history navigation preserves the next shuffled song');
+    s.radio.setMode(s.radio.trackPaths[s.radio.offered[1]],'off');await settle();
+    await s.radio.stepTrack(1);await s.game(1,7);assert.notEqual(s.radio.mode(s.radio.trackPaths[s.radio.playing.index]),'off');
+  } finally { s.radio.stop();storage(); }
+});
+
+test('shuffle previews stay stable, complete each round and handle changing eligibility and tiny folders', t => {
+  t.mock.method(Math,'random',()=>0);
+  const order=new ShuffleOrder(),fit=[0,1,2,3,4],heard=[];
+  for(let round=0;round<20;round++){
+    const batch=[];
+    for(let k=0;k<fit.length;k++){
+      const pick=order.peek(fit);assert.equal(order.peek(fit),pick);
+      if(heard.length)assert.notEqual(pick,heard.at(-1));
+      order.played(pick);batch.push(pick);heard.push(pick);
+    }
+    assert.deepEqual(batch.toSorted(),fit);
+  }
+  const changed=[1,3,5],batch=[];
+  for(let k=0;k<changed.length;k++){const pick=order.peek(changed);batch.push(pick);order.played(pick);}
+  assert.deepEqual(batch.toSorted(),changed);
+  assert.equal(order.peek([]),-1);assert.equal(order.previous([]),-1);
+  for(let k=0;k<3;k++){assert.equal(order.peek([9]),9);order.played(9);}
+  assert.equal(order.previous([9]),9);
 });
 
 // The unit test is built for this machine: the clang of deps/wasi-sdk-* (as web/build.sh finds it) when it can build for the host (wasi-sdk's
@@ -301,4 +426,14 @@ test('the runtime: the song number, the tags and the scenarios of the game\'s so
     '-o', bin, path.join(ROOT, 'tests/radio_unit.c')]);
   const got = execFileSync(bin, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 120_000 }).trim();
   assert.match(got, /radio_unit: 0 failed; scenarios: 0 of \d+ failed$/, got.split('\n').filter(l => !l.startsWith('ok ')).join('\n'));
+});
+
+
+test('the media folder includes videos, while the game radio keeps audio only', async () => {
+  const root = dir('Media', handle('song.MP3'), handle('clip.mp4'), dir('Clips', handle('movie.webm'), handle('notes.txt')));
+  globalThis.showDirectoryPicker = async () => root;
+  try {
+    assert.deepEqual((await pickMusic(true)).paths, ['song.MP3', 'clip.mp4', 'Clips/movie.webm']);
+    assert.deepEqual((await pickMusic()).paths, ['song.MP3']);
+  } finally { delete globalThis.showDirectoryPicker; }
 });

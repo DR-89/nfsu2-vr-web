@@ -12,11 +12,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {findWasi,execBuild} from '../tools/build-tools.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const WASI = fs.existsSync(path.join(REPO, 'deps')) &&
-  fs.readdirSync(path.join(REPO, 'deps')).filter(d => d.startsWith('wasi-sdk-')).map(d => path.join(REPO, 'deps', d)).pop();
-const CC = WASI && path.join(WASI, 'bin/clang');
+const WASI = findWasi(REPO);
+const CC = WASI && `${WASI}/bin/clang`;
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
 /* a test program under web/tools/wasi-run.mjs, what it wrote (stdout, then stderr); env: more of its environment */
 function run(w, env, args = []) {
@@ -36,7 +36,7 @@ const TRACE_NO_WINDOW = 'fa2cb5ce';
 test('heap address space: best fit, segments given back, trips never short of the streamer\'s block, double frees refused', { skip: !CC && 'no wasi-sdk in deps/', timeout: 300_000 }, () => {
   const w = path.join(OUT, 'heap_va_unit.wasm');
   // as web/build.sh: the guest owns [0, 640 MB) of the memory, the runtime's data above it
-  execFileSync(CC, ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-msimd128', '-mbulk-memory', '-mnontrapping-fptoint',
+  execBuild(CC, ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-msimd128', '-mbulk-memory', '-mnontrapping-fptoint',
     '-D_WASI_EMULATED_MMAN', '-D_WASI_EMULATED_SIGNAL', '-D_WASI_EMULATED_PROCESS_CLOCKS', '-fno-delete-null-pointer-checks',
     '-include', 'runtime/web/compat/wasm_plat.h', '-Iruntime/web/compat', '-Iruntime',
     '-o', w, 'web/test/heap_va_unit.c', 'runtime/heap.c', 'runtime/mem.c',
@@ -69,7 +69,7 @@ test('heap address space: best fit, segments given back, trips never short of th
 
 test('the runtime\'s heap steps over the guest heap\'s window (runtime/web/sbrk.c with dlmalloc)', { skip: !CC && 'no wasi-sdk in deps/', timeout: 300_000 }, () => {
   const w = path.join(OUT, 'sbrk_window_unit.wasm');
-  execFileSync(CC, ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-Iruntime', '-o', w, 'web/test/sbrk_window_unit.c', 'runtime/web/sbrk.c',
+  execBuild(CC, ['--target=wasm32-wasip1-threads', '-pthread', '-O2', '-Iruntime', '-o', w, 'web/test/sbrk_window_unit.c', 'runtime/web/sbrk.c',
     '-Wl,--import-memory,--export-memory,--shared-memory,--initial-memory=67108864,--max-memory=4294967296'],
   { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const out = run(w, { WASI_PAGES: '1024' });

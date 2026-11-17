@@ -20,11 +20,15 @@
 #include <stddef.h>
 
 #define GW_MAGIC   0x55504757u          /* "WGPU" */
-#define GW_VERSION 7u                   /* 7: immutable per-draw headlights */
+#define GW_VERSION 8u                   /* 8: semantic cockpit HUD draws */
 #define GW_NBUF    2                    /* record buffers: one being written, one handed off */
 
 /* GwDraw.kind */
 enum { GW_DRAW = 0, GW_CLEAR = 1, GW_BLIT = 2 };
+#define GW_VR_HUD 1u                   /* original FEng UI, 640x480 layout, transparent capture */
+#define GW_VR_PERSPECTIVE 2u           /* shader's actual clip-w row depends on position */
+#define GW_VR_VIEW_SHIFT 4u            /* actual eView owner, zero outside world rendering */
+#define GW_VR_DRIVER_SHIFT 8u          /* crossed-card proxy: scene car index+1, 65 local, 66 second local */
 
 /* One record.  Fields as in metal.m's MDraw, minus the HD-only ones (c0, gh). */
 typedef struct {
@@ -59,6 +63,7 @@ typedef struct {
     uint32_t clip;        /* the 2D UI on a screen narrower than 4:3: rows y0 | y1 << 16 of the back buffer
                            * (its 4:3 band), the draw kept between them; 0 = the whole target (com.c) */
     float viewport[6];   /* x,y,width,height,minZ,maxZ; width=0: full target */
+    uint32_t vr_flags;    /* GW_VR_*; never inferred from texture or shader IDs */
 } GwDraw;
 
 typedef struct {
@@ -141,7 +146,7 @@ typedef struct {
     double   ts_ms;       /* the latest rAF time, ms on the shared clock (performance.timeOrigin + rAF timestamp) */
     double   period_ms;   /* median rAF interval */
     int32_t  hz;          /* refresh rate from the median interval (0 = not measured yet) */
-    int32_t  visible;     /* document visible */
+    int32_t  visible;     /* 0 hidden, 1 visible document, 2 immersive XR */
 } GwVsync;
 
 /* Resource queue records: a 32-byte header, then the payload.  Records are
@@ -283,7 +288,7 @@ typedef struct { uint32_t magic, state, n, target, gen, ack, tile, want; float f
 /* Layout word: changes whenever a struct above changes shape. */
 #define GW_LAYOUT ((uint32_t)(sizeof(GwDraw) | sizeof(GwFrame) << 8 | (sizeof(GwCtl) & 0xFFF) << 16) ^ (GW_VERSION << 28))
 
-_Static_assert(sizeof(GwDraw) == 180, "GwDraw");
+_Static_assert(sizeof(GwDraw) == 184, "GwDraw");
 _Static_assert(offsetof(GwDraw, kind) == 16 && offsetof(GwDraw, aref) == 24 && offsetof(GwDraw, depth) == 28, "GwDraw a");
 _Static_assert(offsetof(GwDraw, ps) == 44 && offsetof(GwDraw, psci) == 48 && offsetof(GwDraw, vsid) == 52, "GwDraw b");
 _Static_assert(offsetof(GwDraw, rawoff) == 56 && offsetof(GwDraw, koff) == 60 && offsetof(GwDraw, proj) == 64, "GwDraw c");

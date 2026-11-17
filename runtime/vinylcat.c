@@ -35,6 +35,7 @@
 #include "game.h"
 #include "widescreen.h"           /* HOOK_SITE */
 #include "featurelist.h"
+#include "setting.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -70,6 +71,8 @@ static const struct { const char *vinyl, *cars; } ONLY[] = {
 };
 
 static uint32_t g_label;
+static int g_enabled=-1;
+void vinylcat_set_enabled(int enabled){ if(enabled==0 || enabled==1)g_enabled=enabled; }
 
 /* the label, in the game's language: "Special", in each Latin-script language as a vinyl category's word (not the
  * word its Unique category has: Turkish "Ozel" and Hungarian "Kulonleges" are those); Russian, Ukrainian and Korean
@@ -155,6 +158,8 @@ static int hidden_vinyls(CPU *c, uint32_t car, uint32_t *out, int *nout){
 
 int vinylcat_hook(CPU *c, uint32_t ip){
     if (ip != HOOK_SITE(0x0054625c)) return 0;   /* mov eax, [esi+4]: the categories are in */
+    if(g_enabled<0)g_enabled=setting_bool("NFSU2_SPECIAL_VINYLS",0);
+    if(!g_enabled)return 1;
     uint32_t fe = MR32(G_FECAR);
     if (!guest_ok_bytes(fe, 4u) || !guest_ok_bytes(MR32(fe), 8u)) return 1;
     uint32_t car = gcall(c, MR32(MR32(fe) + 4u), fe, 0, 0);

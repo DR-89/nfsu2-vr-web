@@ -12,13 +12,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import {findWasi,execBuild} from '../tools/build-tools.mjs';
 import * as esbuild from 'esbuild';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const js = (await esbuild.build({ entryPoints: [path.join(REPO, 'web/src/app/horn-preview.ts')], bundle: true, format: 'esm', write: false, platform: 'neutral' })).outputFiles[0].text;
 const H = await import('data:text/javascript,' + encodeURIComponent(js));
-const WASI = fs.readdirSync(path.join(REPO, 'deps')).filter(d => d.startsWith('wasi-sdk-')).map(d => path.join(REPO, 'deps', d)).pop();
-const CC = WASI && path.join(WASI, 'bin/clang');
+const WASI = findWasi(REPO);
+const CC = WASI && `${WASI}/bin/clang`;
 const OUT = path.join(REPO, 'out/web/test'); fs.mkdirSync(OUT, { recursive: true });
 // the game build's target and code generation (web/build.sh), as web/test/roam-wasm.test.mjs builds
 const FLAGS = ['--target=wasm32-wasip1-threads', '-pthread', '-O3', '-msimd128', '-mbulk-memory', '-mnontrapping-fptoint',
@@ -53,7 +54,7 @@ test('every horn renders', () => {
 
 test("the page's horns are horn.c's", { skip: !CC && 'no wasi-sdk in deps/' }, () => {
   const w = path.join(OUT, 'horn_render.wasm');
-  execFileSync(CC, [...FLAGS, '-o', w, 'tests/horn_render.c', ...LINK], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+  execBuild(CC, [...FLAGS, '-o', w, 'tests/horn_render.c', ...LINK], { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   const dir = fs.mkdtempSync(path.join(OUT, 'horn-'));
   try {
     for (const name of H.HORN_NAMES) for (const [held, rate] of [[H.previewHold(name), 48000], [0.275, 44100], [3.3, 44100]]) {

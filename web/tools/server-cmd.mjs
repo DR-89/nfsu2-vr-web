@@ -11,7 +11,10 @@
 // server of before: the tests (node --test) refuse it, the tools say so.  $NFSU2_SERVER_BIN is taken as it is.
 import fs from 'node:fs';
 import path from 'node:path';
+import net from 'node:net';
 import { fileURLToPath } from 'node:url';
+import { wslPath } from './build-tools.mjs';
+export { wslPath } from './build-tools.mjs';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const WIN = process.platform === 'win32';
@@ -26,15 +29,6 @@ if (WIN) {
     'COMPRESS_THREADS'];
   const have = (process.env.WSLENV || '').split(':').filter(Boolean);
   process.env.WSLENV = [...new Set([...have, ...paths.map(n => `NFSU2_${n}/p`), ...plain.map(n => `NFSU2_${n}`)])].join(':');
-}
-
-/** a Windows path as WSL sees it (C:\x -> /mnt/c/x, \\wsl.localhost\<distro>\x -> /x); anything else as it is */
-export function wslPath(p) {
-  const s = String(p);
-  const drive = /^([A-Za-z]):[\\/](.*)$/.exec(s);
-  if (drive) return `/mnt/${drive[1].toLowerCase()}/${drive[2].replace(/\\/g, '/')}`;
-  const share = /^[\\/]{2}(?:wsl\.localhost|wsl\$)[\\/][^\\/]+[\\/]?(.*)$/i.exec(s);
-  return share ? '/' + share[1].replace(/\\/g, '/') : s;
 }
 
 /** a source of the server newer than bin, or '' (the checkout's own binary only) */
@@ -75,4 +69,36 @@ export function serverCommand(args, bin = SERVER_BIN) {
   // WSLENV hands WSL every name it lists, an unset one as empty: drop those, then the server takes the shell's place
   const unsetEmpty = `for v in $(env | grep -o '^NFSU2_[A-Z_]*=$' | tr -d =); do unset "$v"; done; exec "$@"`;
   return ['wsl.exe', [...(distro ? ['-d', distro] : []), '-e', 'sh', '-c', unsetEmpty, 'sh', wslPath(bin), ...args.map(wslPath)]];
+}
+
+/** The startup banner precedes Windows' WSL port forwarding. Wait until the
+ * caller can connect, and include both output streams if startup fails. */
+export function waitForServer(srv, port, { host = '127.0.0.1', timeout = 15_000 } = {}) {
+  return new Promise((resolve, reject) => {
+    let output = '', started = false, finished = false, socket, retry;
+    const timer = setTimeout(() => finish(new Error('server did not become reachable: ' + output)), timeout);
+    const finish = error => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer); clearTimeout(retry); socket?.destroy();
+      srv.stdout.off('data', stdout); srv.stderr.off('data', stderr);
+      srv.off('error', failed); srv.off('exit', exited);
+      error ? reject(error) : resolve();
+    };
+    const probe = () => {
+      socket = net.connect({ host, port });
+      socket.setTimeout(1000, () => socket.destroy(new Error('connection timed out')));
+      socket.once('connect', () => finish());
+      socket.once('error', () => { if (!finished) retry = setTimeout(probe, 50); });
+    };
+    const stdout = data => {
+      output += data;
+      if (!started && output.includes('  access    :')) { started = true; probe(); }
+    };
+    const stderr = data => { output += data; };
+    const failed = error => finish(error);
+    const exited = code => finish(new Error('server exited ' + code + ' ' + output));
+    srv.stdout.on('data', stdout); srv.stderr.on('data', stderr);
+    srv.once('error', failed); srv.once('exit', exited);
+  });
 }

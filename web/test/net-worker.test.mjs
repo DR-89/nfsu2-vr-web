@@ -139,6 +139,27 @@ test('the game\'s end closes the worker\'s link', async () => {
   assert.equal(workers[0].closed, true);
 });
 
+test('connection-profile acknowledgements survive worker startup, fallback, rejection and teardown',async()=>{
+  for(const mode of [{},{fail:true}]){
+    fakeWorkers(mode);const proc=fakeProc(),link=attachNetWorker(proc,{});
+    assert.equal(await link.profile(null),true);assert.equal(link.state,'away');
+    link.setAway(false);await tick(20);assert.equal(link.state,'away','activity cannot reconnect a deliberate disconnect');
+    assert.equal(await link.profile({name:'Valid'}),true);assert.equal(await link.profile({name:'bad\n'}),false);
+    link.goOffline();assert.equal(await link.profile({name:'Another'}),false);link.close();assert.equal(await link.profile({name:'Valid'}),false);
+  }
+  fakeWorkers({fail:true});const link=attachNetWorker(fakeProc(),{}),pending=link.profile(null);link.close();assert.equal(await pending,false);
+});
+
+test('a worker error during profile switching rejects pending work and late acknowledgements cannot reopen it',async()=>{
+  fakeWorkers();const link=attachNetWorker(fakeProc(),{});await tick(50);
+  const w=workers[0],post=w.postMessage;w.postMessage=m=>{if(m.t!=='call'||m.m!=='profile')post(m);};
+  const pending=link.profile({name:'Valid'});w.onerror({message:'worker stopped',preventDefault(){}});
+  assert.equal(await pending,false);assert.equal(link.state,'closed');assert.equal(await link.profile(null),false);
+  assert.equal(link.stats().state,'closed');assert.equal(link.vip,null);assert.deepEqual(link.peers,[]);
+  w.onmessage({data:{t:'profile',id:1,accepted:true,now:{state:'online',vip:'10.77.1.5',roam:true,lan:false,stats:{}}}});
+  assert.equal(link.state,'closed');
+});
+
 test('no module workers: the link runs on the page\'s thread', async () => {
   fakeWorkers({ throws: true });
   const proc = fakeProc(), logs = [];

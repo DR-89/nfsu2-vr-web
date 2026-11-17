@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import {spawnBuild} from '../tools/build-tools.mjs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
@@ -41,7 +41,7 @@ function tree({ module = 0, page = 0, server = 0 } = {}) {
   return t;
 }
 const run = t => {
-  const r = spawnSync('bash', [path.join(t, 'web/start.sh'), '--data', path.join(t, 'game'), '--http-port', '48080'],
+  const r = spawnBuild('bash', [path.join(t, 'web/start.sh'), '--data', path.join(t, 'game'), '--http-port', '48080'],
     { cwd: t, encoding: 'utf8', timeout: 60000 });
   return { code: r.status, out: (r.stdout ?? '') + (r.stderr ?? '') };
 };

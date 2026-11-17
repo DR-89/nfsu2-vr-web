@@ -358,6 +358,26 @@ static Rc *rc_of_car(uint32_t car){
     return 0;
 }
 int racecars_fed(uint32_t car){ return racecars_on() && in_race() && rc_of_car(car) != 0; }
+#ifdef __wasm__
+#include "web/vr_web.h"
+/* Map only authenticated race peers onto the game's own race-slot cars. No
+ * client-supplied avatar car id can attach a driver to somebody else's car. */
+uint32_t racecars_vr_cars(VrCar *out, uint32_t capacity, uint32_t *peers, uint32_t *peer_count){
+    *peer_count = 0;
+    if (!in_race()) return 0;
+    int np = racenet_race_peers(peers, 8);
+    *peer_count = (uint32_t)np;
+    uint32_t n = 0;
+    for (int i = 0; i < np && n < capacity; i++) {
+        Rc *r = rc_of_ip(peers[i], 0);
+        if (!r || r->slot < 0 || r->slot >= 6) continue;
+        uint32_t car = car_of_slot(r->slot);
+        if (!car || !rc_of_car(car) || !vr_web_car(car, out + n)) continue;
+        out[n].vip = peers[i]; out[n].peer_id = (uint32_t)r->slot + 1; n++;
+    }
+    return n;
+}
+#endif
 static int32_t rtt_min(const Rc *r){
     int32_t m = 0;
     for (int k = 0; k < r->rn; k++) if (k == 0 || r->rtt[k] < m) m = r->rtt[k];

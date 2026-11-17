@@ -21,6 +21,10 @@ typedef struct {
 #define STANCE_KIND       4u         /* MODPARTS.DAT's entry kind (modpacks.c) */
 
 int  stance_on(void);                                 /* settings.ini stance */
+/* Native VR model defaults, persisted by the page before publishing. Empty/v1
+ * clears model defaults without changing any garage entry. Invalid input changes nothing. */
+int  stance_configure(const char *models, int enabled);
+int  stance_snapshot(uint32_t car, StanceV *value, int *stock_front);
 int  stance_ok(const StanceV *v);                     /* every value in its range */
 const StanceV *stance_mine(int p);                    /* player p's car's, 0: none of its own */
 int  stance_wire_mine(int16_t v[5]);                 /* roam_game.c: RC_EXT_STANCE */

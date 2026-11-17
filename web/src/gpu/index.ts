@@ -15,10 +15,17 @@
 import type { GameProcess } from '../host/process';
 import { HostKind } from '../host/abi';
 import { MemoryBuffer } from '../host/memory';
+import { ImmersiveSession } from '../vr/session';
+import { CinemaRenderer,MenuRenderer,cinemaMatrix } from '../vr/cinema';
+import { DriverRenderer } from '../vr/driver-renderer';
+import type { RemoteAvatar } from '../vr/multiplayer';
+import type { VRSettings } from '../vr/settings';
+import { eyeCorrection } from '../vr/math';
+import {rotationWarp,EyePresenter,type EyePose} from '../vr/reprojection';
 import * as P from './proto';
 import { avifDecodes } from './hqskin';
 import { C, F } from './proto';
-import { Encoder } from './encoder';
+import { Encoder, type EncodeStats } from './encoder';
 import type { FromPng, ToPng, ToPngEnd, ToPngTile } from './png-worker';
 import { PH_ADD, PH_DONE, PH_NOW, PH_OFF, PLAIN_LOOK, PhotoPicture, type PhotoLook, type PhotoTile } from './photo-picture';
 import { GPU_PIPELINES, localStore } from '../app/prefs';
@@ -33,6 +40,11 @@ const PHOTO_ECHO_MS = 1500;
 const TILES_BYTES = 160e6, TILES_BYTES_PHONE = 48e6;
 
 export interface RendererOptions {
+  cockpit?: import('../vr/cockpit').Cockpit;
+  avatars?: () => ReadonlyMap<number, RemoteAvatar>;
+  vrSettings?: VRSettings;
+  /** The existing frame-rate setting can request 120 Hz from a capable headset. */
+  vrFrameRate?: 90 | 120;
   /** where frame dumps go: a URL prefix that accepts PUT <prefix><name>.png (the dev server's /artifacts/) */
   artifacts?: string;
   /** scale factor for dumps (the Mac references are 0.3 of 3600x2196) */
@@ -133,6 +145,7 @@ export interface RendererWindow {
 
 export interface Renderer {
   readonly device: GPUDevice;
+  readonly vr: ImmersiveSession;
   stats(): RendererStats;
   /** read the back buffer of the next encoded frame as PNG; with opts.artifacts it is also
    *  uploaded as <name>.png (an autotest dump falling on the same frame keeps its own name); mark: the site's
@@ -186,7 +199,10 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   const log = opts.log ?? ((s: string) => console.log(s));
   const attachedAt = performance.now();
   if (!navigator.gpu) throw new Error('WebGPU is not available in this browser');
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  const xrAvailable = typeof XRGPUBinding !== 'undefined';
+  const xrAdapter = xrAvailable ? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance', xrCompatible: true })
+    .catch(error => { log(`[vr] XR adapter unavailable: ${error}`); return null; }) : null;
+  const adapter = xrAdapter ?? await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('no WebGPU adapter');
   // without BC the encoder unpacks the DXT textures as they upload (dxt.ts), but for DXT1 on a GPU with ASTC (Apple's),
   // which it rewrites as ASTC 4x4 (astc.ts): a quarter of the memory unpacked takes
@@ -263,6 +279,22 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   }
   let enc: Encoder;
   try { enc = new Encoder(device, mem, reg.ptr, log); } catch (e) { giveUp(e); }
+  if (opts.cockpit || (opts.avatars && opts.vrSettings?.avatars)) enc.drivers = new DriverRenderer(device, opts.avatars??(()=>new Map()), log, opts.cockpit);
+  let cockpitPointer:number|null=null;
+  const cockpitClick = (e: PointerEvent) => {
+    const phase=e.type==='pointerdown'?'down':e.type==='pointermove'?'move':e.type==='pointerup'?'up':e.type==='pointerleave'?'leave':'cancel';
+    if(phase==='down'&&e.button!==0||cockpitPointer!==null&&cockpitPointer!==e.pointerId)return;
+    if(phase!=='down'&&phase!=='move'&&phase!=='leave'&&cockpitPointer===null)return;
+    const r=canvas.getBoundingClientRect();
+    const handled=opts.cockpit?.pointer((e.clientX-r.left)/r.width*2-1,1-(e.clientY-r.top)/r.height*2,phase);
+    if(phase!=='leave'&&(handled||cockpitPointer===e.pointerId)){
+      e.preventDefault();e.stopImmediatePropagation();
+      if(phase==='down'){cockpitPointer=e.pointerId;canvas.setPointerCapture(e.pointerId);}
+      if(phase==='up'||phase==='cancel'){cockpitPointer=null;if(canvas.hasPointerCapture(e.pointerId))canvas.releasePointerCapture(e.pointerId);}
+    }
+  };
+  const cockpitEvents=['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture','pointerleave'] as const;
+  for(const event of cockpitEvents)canvas.addEventListener(event,cockpitClick,{capture:true});
   enc.logShaders = !!opts.logShaders;
   enc.pointTex = !!opts.pixelated;
   if (enc.pointTex) log('[gpu] pixelated textures');
@@ -277,6 +309,8 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   const keepWarm = () => { if (enc.warmDirty) localStore.setJSON(GPU_PIPELINES, enc.warmEntries().slice(-4000)); };
   const vw = vreg.ptr >>> 2, vf = vreg.ptr >>> 3;
 
+  const vr = new ImmersiveSession(proc, device, log, xrAdapter !== null, opts.vrFrameRate);
+  if (opts.vrSettings) vr.settings = opts.vrSettings;
   // page -> game: view size, pixel ratio, features.  The view is the canvas element's box in device pixels (what
   // canvas.width/height are when the page sizes the canvas), kept apart from canvas.width/height, which follow the
   // game's picture at a render scale below 1 (fitPicture).
@@ -386,7 +420,7 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     if (failRun === LOST_AFTER) lost(`device gone: ${LOST_AFTER} times in a row the WebGPU calls failed`);
   };
   const pump = () => {
-    if (!alive || pumping) return;
+    if (!alive || pumping || (vr.active && !vr.renderEyes.length)) return;
     pumping = true;
     try {
       for (;;) {
@@ -415,6 +449,7 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
         if (!take) break;
         try { encodeAndSubmit(r - 1); failRun = 0; } catch (x) { failed('encode', x); }
         Atomics.store(I, cw + C.state, 0); Atomics.notify(I, cw + C.state);
+        if (vr.active) break;
       }
     } finally { pumping = false; }
   };
@@ -561,20 +596,32 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     if (!u32()[fw + F.dump]) return null;
     return new TextDecoder().decode(new Uint8Array(mem.buffer).slice((fw + F.dumpLabel) * 4, (fw + F.dumpLabel) * 4 + 64)).replace(/\0.*$/s, '');
   };
+  let spectatorAt=-Infinity;
   const encodeAndSubmit = (b: number) => {
     const t0 = performance.now();
     const ce = device.createCommandEncoder();
     const slot = timing && !qBusy[qNext] ? qNext : -1;
     if (slot >= 0) { qNext = (qNext + 1) % TQ; enc.firstPassTs = { querySet: qs!, beginningOfPassWriteIndex: 2 * slot }; }
     fitPicture(b);
-    const cur = ctx.getCurrentTexture();
     sinceRaf++; winUnshownFrames++;
     if (t0 - winUnshownT > SUMMARY_MS) summary(t0);
     const tone = toneOf(b), ph = photoOf(b), more = ph ? photoMore(b) : null;
     if (!ph && picState !== PH_OFF) { pic?.destroy(); pic = null; }           // photo mode ended: its textures go
     picState = ph ? ph[0] : PH_OFF;
     const tileReads: { rb: Readback; t: Taking; x: number; y: number }[] = [];
-    const st = enc.encodeFrame(b, ce, direct && !tone && !ph ? cur : undefined);
+    const frameWords = u32(), frameAt = cw + C.frame + b * (P.FRAME_BYTES >> 2);
+    // A spectator image can reuse an eye. Drawing a third world at the desktop
+    // size also reallocates the primary depth/MSAA targets at every XR frame.
+    // Original-camera readbacks and photo captures retain their dedicated view.
+    const stereo = vr.active && vr.renderEyes.length && !ph && !frameWords[frameAt + F.rbId] && dumpLabel(b) === null &&
+      !dumpWaiters.length && !photoWaiters.length && !opts.pixelatedDump && !opts.anisoDump
+      ? encodeEyes(b, true) : null;
+    // The desktop spectator is separate from the headset. Limit its compositor
+    // copies to 30 Hz so a 120 Hz headset does not also submit 120 desktop frames.
+    // Captures, menus and returning to flat play always acquire a fresh canvas.
+    const cur=!stereo||t0-spectatorAt>=1000/30||slot>=0?ctx.getCurrentTexture():null;
+    if(cur)spectatorAt=t0;
+    const st = stereo ?? enc.encodeFrame(b, ce, direct && !tone && !ph ? cur! : undefined);
     burn?.(ce);
     const scr = enc.screen!;   // the canvas texture itself, or the back buffer
     const tsEnd: GPURenderPassTimestampWrites | undefined = slot >= 0 ? { querySet: qs!, endOfPassWriteIndex: 2 * slot + 1 } : undefined;
@@ -584,11 +631,11 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     if (st.direct) {
       // the screen is already in the canvas texture
       directFrames++;
-      imgRect = { x: 0, y: 0, w: cur.width, h: cur.height };
+      imgRect = { x: 0, y: 0, w: cur!.width, h: cur!.height };
       // GPU timing ends with a pass of its own that reads one texel of the screen, so it
       // waits for every pass that drew there (a pass without that dependency may run early)
       if (tsEnd) enc.copyQuad(ce, enc.screenView!, tsView(), 'bgra8unorm', nearest, undefined, true, tsEnd);
-    } else {
+    } else if(cur) {
       // composite: the back buffer aspect-fit into the canvas at its own resolution, with Exposure and White Level
       const cvw = cur.width, cvh = cur.height;
       const sc = Math.min(cvw / scr.width, cvh / scr.height);
@@ -666,7 +713,8 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     // a texture the game waits for (gpu_web.c metal_read_texture), drawn by this very frame
     const rbId = U[fw + F.rbId], rbTex = rbId ? enc.readable(ce, U[fw + F.rbTex]) : null;
     const rbRead = rbTex ? copyOut(ce, rbTex) : null;
-    device.queue.submit([ce.finish()]);
+    if(cur||burn||reads.length||rbRead||tileReads.length)device.queue.submit([ce.finish()]);
+    if (vr.active && vr.renderEyes.length && !stereo) encodeEyes(b);
     enc.afterSubmit();
     for (const r of tileReads) tileOut(r.rb, r.t, r.x, r.y);
     // tests (play.html pixelated=dump): an autotest dump labelled <name>_px is the frame as the game set it, and the
@@ -818,6 +866,101 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   };
 
   const linear = device.createSampler({ minFilter: 'linear', magFilter: 'linear' });
+  const eyes: ({ texture: GPUTexture; view: GPUTextureView } | null)[] = [null, null];
+  let cinema: CinemaRenderer | null=null;
+  let menuRenderer:MenuRenderer|null=null;
+  let cinemaImage: {texture:GPUTexture;view:GPUTextureView}|null=null;
+  let cinemaActive=false;
+  let eyeRevision=0;
+  const eyePoses:(EyePose|undefined)[]=[];
+  let eyePresenter:EyePresenter|null=null;
+  const encodeEyes = (b: number, worldOnly = false): EncodeStats | null => {
+    const renderEyes=vr.renderEyes;if(!vr.active||!renderEyes.length)return null;
+    const u = u32(), fw = cw + C.frame + b * (P.FRAME_BYTES >> 2);
+    const w = u[fw + F.bbW], h = u[fw + F.bbH], k = u[fw + F.k] + 1792;
+    if (!w || !h || !k || k + 208 > mem.buffer.byteLength) return null;
+    const header = new Uint32Array(mem.buffer, k, 4), matrices = new Float32Array(mem.buffer, k + 16, 48);
+    const views=renderEyes.map(eye=>({eye,size:{width:eye.width,height:eye.height},correction:
+      header[0]===0x3152564e && header[1]?eyeCorrection(eye.projection,eye.view,matrices.subarray(16,32),matrices.subarray(0,16)):null}));
+    if(worldOnly && (!views.length || views.some(v=>!v.size||!v.correction)))return null;
+    eyeRevision++;
+    const stats:EncodeStats={draws:0,passes:0,skipped:0,encodeMs:0,direct:false};
+    let uploaded=false;
+    for (let i = 0; i < views.length; i++) {
+      const {eye,size,correction}=views[i];
+      if(!size)continue;
+      const eyeW=size.width,eyeH=size.height;
+      let target = eyes[i];
+      if (!target || target.texture.width !== eyeW || target.texture.height !== eyeH) {
+        target?.texture.destroy();
+        const texture = device.createTexture({ label: `VR eye ${i}`, size: [eyeW, eyeH], format: 'bgra8unorm',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST });
+        target = eyes[i] = { texture, view: texture.createView() };
+      }
+      cinemaActive=!correction;
+      const command = device.createCommandEncoder({ label: `VR scene ${i}` });
+      if(correction){
+        eyePoses[i]={projection:new Float32Array(eye.projection),view:new Float32Array(eye.view)};
+        const result = enc.encodeFrame(b, command, target.texture, correction, uploaded);
+        uploaded=true;
+        stats.draws+=result.draws;stats.passes+=result.passes;stats.skipped+=result.skipped;stats.encodeMs+=result.encodeMs;
+        if (!result.direct) enc.copyQuad(command, enc.screenView!, target.view, 'bgra8unorm', linear);
+      }else{
+        cinema??=new CinemaRenderer(device);
+        if(!cinemaImage||cinemaImage.texture.width!==w||cinemaImage.texture.height!==h){
+          cinemaImage?.texture.destroy();
+          const texture=device.createTexture({label:'VR menu image',size:[w,h],format:'bgra8unorm',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.COPY_SRC});
+          cinemaImage={texture,view:texture.createView()};
+        }
+        if(i===0){const result=enc.encodeFrame(b,command,cinemaImage.texture);if(!result.direct)enc.copyQuad(command,enc.screenView!,cinemaImage.view,'bgra8unorm',linear);}
+      }
+      // Each eye is submitted before the next eye updates shared draw uniforms.
+      device.queue.submit([command.finish()]);
+    }
+    return stats;
+  };
+  const presentEyes = () => {
+    const frame = vr.frame; if (!frame) return;
+    const warps=frame.eyes.map((eye,i)=>rotationWarp(cinemaActive?undefined:eyePoses[i],eye));
+    // Menus and movies can update slower than the headset. Reproject their
+    // stationary plane at every XR pose without asking the guest to redraw.
+    if(cinemaActive&&cinema&&cinemaImage){
+      eyeRevision++;
+      const model=cinemaMatrix(cinemaImage.texture.width,cinemaImage.texture.height,vr.settings.height,vr.settings.forward);
+      for(let i=0;i<Math.min(frame.eyes.length,2);i++)if(eyes[i]){
+        const command=device.createCommandEncoder({label:'VR menu pose'}),eye=frame.eyes[i];
+        cinema.draw(command,cinemaImage.view,eyes[i]!.view,eye.projection,eye.view,model);
+        if(vr.overlay){menuRenderer??=new MenuRenderer(device);menuRenderer.draw(command,eyes[i]!.view,eye.projection,eye.view,vr.overlay);}
+        device.queue.submit([command.finish()]);
+      }
+    }
+    if (vr.bridge) {
+      if(eyes[0]&&eyes[1]&&vr.bridge.presentStereo(frame.eyes.map(e=>e.xrView),eyeRevision,(target,rects,format)=>{
+        const ce=device.createCommandEncoder({label:'VR stereo compatibility presentation'});
+        for(let i=0;i<2;i++)enc.copyQuad(ce,eyes[i]!.view,target,format,linear,rects[i],true,undefined,i>0);
+        device.queue.submit([ce.finish()]);
+      },warps))return;
+      for (let i = 0; i < Math.min(frame.eyes.length, 2); i++) {
+        const cached = eyes[i]; if (!cached) continue;
+        vr.bridge.present(i, frame.eyes[i].xrView, cached.view, (source, target, format) => {
+          const ce = device.createCommandEncoder({ label: 'VR compatibility presentation' });
+          enc.copyQuad(ce, source, target, format, linear); device.queue.submit([ce.finish()]);
+        },eyeRevision,warps[i]);
+      }
+      return;
+    }
+    const command = device.createCommandEncoder({ label: 'VR presentation' });
+    for (let i = 0; i < Math.min(frame.eyes.length, 2); i++) {
+      const cached = eyes[i], { image } = frame.eyes[i];
+      if (!image) continue;
+      const target = image.colorTexture.createView(image.getViewDescriptor());
+      const v = image.viewport;
+      if (cached) {eyePresenter??=new EyePresenter(device);eyePresenter.draw(command,i,cached.view,target,vr.format,v,warps[i]);}
+      else command.beginRenderPass({ colorAttachments: [{ view: target, loadOp: 'clear', storeOp: 'store', clearValue: [0,0,0,1] }] }).end();
+    }
+    device.queue.submit([command.finish()]);
+  };
+
   const nearest = device.createSampler({ minFilter: 'nearest', magFilter: 'nearest' });
 
   // the PNG is made in a worker (png-worker.ts), started at the first dump: here the frame is only copied out
@@ -854,8 +997,13 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   const snap = (hzRaw: number) => { for (const r of RATES) if (Math.abs(hzRaw / r - 1) < 0.025) return r; return Math.round(hzRaw); };
   const iv: number[] = [];
   let lastT = 0, hz = 0, cand = 0, candSince = 0, rafHz = 0, rafId = 0;
-  const raf = (t: number) => {
+  let clockImmersive=false;
+  const raf = (t: number, immersive = false) => {
+    if (vr.active && !immersive) { rafId = requestAnimationFrame(raf); return; }
     if (!alive) return;
+    if(clockImmersive!==immersive){clockImmersive=immersive;iv.length=0;lastT=0;hz=0;cand=0;}
+    const headsetHz=immersive?vr.refreshRate:0;
+    Atomics.store(i32(), vw + P.V.visible, immersive ? 2 : document.visibilityState === 'visible' ? 1 : 0);
     if (lastT) {
       const d = t - lastT;
       if (d > 2 && d < 100) { iv.push(d); if (iv.length > 120) iv.shift(); }
@@ -865,7 +1013,7 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     sinceRaf = 0;
     lastT = t;
     if (ageDone.length) { const now = T0 + performance.now(); for (const ti of ageDone) age.raf.push(now - ti); ageDone = []; }
-    if (iv.length >= 30) {
+    if (iv.length >= 30 || headsetHz) {
       // the median over spans of 4 frames, not of single intervals: Safari on an iPhone or iPad gives rAF times in
       // whole milliseconds, so at 60 Hz an interval is 16 or 17 ms and their median at times said 62.5 Hz ("display
       // 63 Hz"), at 120 Hz always 125: not a standard rate, so the period went out unsnapped and the pacer lost its
@@ -873,9 +1021,11 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
       const sp: number[] = [];
       for (let i = 3; i < iv.length; i++) sp.push((iv[i] + iv[i - 1] + iv[i - 2] + iv[i - 3]) / 4);
       sp.sort((a, b) => a - b);
-      const med = sp[sp.length >> 1];
+      const med = sp.length?sp[sp.length >> 1]:1000/headsetHz;
       rafHz = 1000 / med;
-      const h = snap(rafHz);
+      // Missed XR callbacks are dropped frames, not a slower headset. Feeding
+      // their measured rate back to the guest pacer would lock in the slowdown.
+      const h = headsetHz || snap(rafHz);
       if (h !== cand) { cand = h; candSince = t; }
       if (cand !== hz && (hz === 0 || t - candSince >= 500)) {
         log(`[gpu] display ${cand} Hz (rAF median ${med.toFixed(3)} ms)`);
@@ -883,18 +1033,18 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
       }
       // nominal period of the snapped rate, like CADisplayLink.duration;
       // the game measures the real period from the timestamps itself
-      const per = RATES.includes(hz) ? 1000 / hz : med;
+      const per = headsetHz ? 1000 / headsetHz : RATES.includes(hz) ? 1000 / hz : med;
       const I = i32(), Fv = new Float64Array(mem.buffer);
       Atomics.add(I, vw + P.V.seq, 1);
       Fv[vf + P.V.tsF64] = performance.timeOrigin + t; Fv[vf + P.V.periodF64] = per;
       Atomics.add(I, vw + P.V.seq, 1);
-      Atomics.store(I, vw + P.V.visible, document.visibilityState === 'visible' ? 1 : 0);
       Atomics.add(I, vw + P.V.tick, 1); Atomics.notify(I, vw + P.V.tick);
     }
     pump();
-    rafId = requestAnimationFrame(raf);
+    if (!immersive) rafId = requestAnimationFrame(raf);
   };
   rafId = requestAnimationFrame(raf);
+  vr.onFrame = time => { raf(time, true); presentEyes(); };
 
   // ---- doorbell: the game rings it on every handoff and queue flush ----
   (async () => {
@@ -922,7 +1072,7 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
   try { ro.observe(canvas, { box: 'device-pixel-content-box' }); } catch { ro.observe(canvas); }
 
   return {
-    device,
+    device, vr,
     stats: () => ({ frames, draws: enc.totalDraws, passes: enc.totalPasses, pipelines: enc.pipelinesMade, pipelinesWarm: enc.pipelinesAsync, errors,
       pipelineMs: enc.pipeMs, pipelineMsMax: enc.pipeMsMax, gpuMsAvg: gpuMsN ? gpuMsTotal / gpuMsN : 0, gpuMsMax,
       encodeMsAvg: frames ? encMsTotal / frames : 0, encodeMsLast: encMsLast, drawsLast, passesLast, rafHz, inFlight,
@@ -967,6 +1117,10 @@ export async function attachRenderer(proc: GameProcess, canvas: HTMLCanvasElemen
     },
     detach: () => {
       if (!alive) return;
+      for(const event of cockpitEvents)canvas.removeEventListener(event,cockpitClick,{capture:true});
+      enc.drivers?.destroy(); vr.detach(); for (const e of eyes) e?.texture.destroy();
+      cinema?.destroy();cinemaImage?.texture.destroy();eyePresenter?.destroy();
+      menuRenderer?.destroy();
       alive = false; cancelAnimationFrame(rafId); clearInterval(warmTimer); ro.disconnect();
       keepWarm();
       // the game stops recording at its next present instead of waiting for a page

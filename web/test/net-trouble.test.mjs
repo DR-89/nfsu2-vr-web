@@ -22,8 +22,13 @@ const entry = `export { attachNet } from './web/src/net/index.ts'; export * as P
 const js = (await esbuild.build({ stdin: { contents: entry, resolveDir: ROOT, loader: 'ts' }, bundle: true, format: 'esm', write: false, platform: 'neutral' })).outputFiles[0].text;
 const { attachNet, P } = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'));
 
-// node's own WebSocket reports a refused handshake with an error and no close; a browser's (and ws's) closes it too
-globalThis.WebSocket = WsClient;
+// node's own WebSocket reports a refused handshake with an error and no close;
+// ws, like the browser, closes it too. Its EventEmitter also needs a listener
+// after Link removes onerror during teardown: closing a pending handshake is
+// an error event, not an uncaught exception in the browser.
+globalThis.WebSocket = class extends WsClient {
+  constructor(...args) { super(...args); this.on('error', () => {}); }
+};
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 const until = async (f, what, ms = 8000) => { const t0 = Date.now(); while (!f()) { if (Date.now() - t0 > ms) throw new Error(`${what}: timed out`); await sleep(10); } };
 

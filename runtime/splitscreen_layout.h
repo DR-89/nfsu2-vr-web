@@ -10,6 +10,10 @@ static inline int split_view_id(int seat){
     static const int ids[SPLIT_MAX_PLAYERS] = {1, 2, 5, 6, 7, 8};
     return seat >= 0 && seat < SPLIT_MAX_PLAYERS ? ids[seat] : -1;
 }
+static inline int split_view_slot(unsigned id){
+    for (int k = 0; k < SPLIT_MAX_PLAYERS; ++k) if (id == (unsigned)split_view_id(k)) return k;
+    return -1;
+}
 static inline SplitCell split_layout_cell(int count, int seat, int w, int h, int vertical){
     if (count < 1 || count > SPLIT_MAX_PLAYERS || seat < 0 || seat >= count || w <= 0 || h <= 0)
         return (SplitCell){0, 0, 0, 0};

@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+nfsu2-vr.workspace = true
 nfsu2-util.workspace = true
 nfsu2-names.workspace = true
 nfsu2-ws.workspace = true

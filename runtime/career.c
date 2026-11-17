@@ -1041,7 +1041,13 @@ static void run_job(CPU *c, const char *line){
 void look_frame_end(void);
 void sub_004022c0_orig(CPU *c);
 void sub_004022c0(CPU *c){
-    if (MR32(c->esp) == LOOK_END_RET) look_frame_end();
+    if (MR32(c->esp) == LOOK_END_RET) {
+        look_frame_end();
+#ifdef __wasm__
+        void vr_web_frame_end(void);
+        vr_web_frame_end();
+#endif
+    }
     else if (MR32(c->esp) == GUEST_RET_MAINLOOP){
         if (!g_hooked) bot_init();
         g_hooked = 1;

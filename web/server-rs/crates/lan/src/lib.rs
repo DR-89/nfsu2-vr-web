@@ -250,6 +250,7 @@ mod reader;
 mod route;
 mod store;
 mod text;
+mod vr;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -986,6 +987,7 @@ pub struct LanSwitch {
     stopped: CancellationToken,
     /// where the pages' messages for the server go (`on_text`)
     on_text: OnceLock<OnText>,
+    vr: Mutex<nfsu2_vr::Hub>,
     /// where the switch's own lines for the log go (`on_line`: the `[plate]` lines)
     on_line: OnceLock<OnLine>,
 }
@@ -1062,6 +1064,7 @@ impl LanSwitch {
             gone: Mutex::new(Default::default()),
             stopped: CancellationToken::new(),
             on_text: OnceLock::new(),
+            vr: Mutex::new(nfsu2_vr::Hub::routed()),
             on_line: OnceLock::new(),
             me: me.clone(),
             o,
@@ -1071,6 +1074,7 @@ impl LanSwitch {
     }
 
     fn start_timers(self: &Arc<Self>) {
+        self.start_vr_timer();
         // WebSocket pings keep proxies from cutting a quiet connection and find dead ones
         let me = self.me.clone();
         let stopped = self.stopped.clone();

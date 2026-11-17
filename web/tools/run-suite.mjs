@@ -96,7 +96,7 @@ const TABLE = [
   // Show Player Names (runtime/shownames.c): the game's own row in Options > Gameplay, before Save
   ['shownames', 'options_names.txt', '[names] Show Player Names Off', '', 400],
   // the European game's Corsa and 106 (runtime/regional.c): Quick Race in the Corsa
-  ['eucars', 'qr_eucars.txt', '[expect] PASS', '', 400],
+  ['eucars', 'qr_eucars.txt', '[expect] PASS', 'NFSU2_REGIONAL_CARS=1', 400],
   // photo mode (runtime/photo.c): on, its camera, off, and the pause menu's Photo Mode, as the page drives them
   ['photo', 'photo_mode.txt', "the pause menu's Photo Mode", '', 400],
   // the pause menu's Replay (runtime/photo.c leaves it to the game): after some driving it plays the race back

@@ -68,6 +68,7 @@ static void reset(void){
     memset(&g_music, 0, sizeof g_music);
     memset(&g_song, 0, sizeof g_song);
     memset(&g_heard, 0, sizeof g_heard);
+    memset(&g_cockpit_radio, 0, sizeof g_cockpit_radio);
     memset(&g_page, 0, sizeof g_page);
     memset(&g, 0, sizeof g);
     memset(&pg, 0, sizeof pg);
@@ -742,6 +743,8 @@ TEST(radio_on__no_track_fits__no_song_told){
     expect(g_page.song_kind == RADIO_SONG_NONE && g_page.song_seq > 0, "silence told as no song");
     expect(g_page.song_ms == 0, "nothing heard");
 }
+
+#include "radio_cockpit_cases.h"
 
 int main(void){
     g_mem = calloc(1, 0x28000000u);

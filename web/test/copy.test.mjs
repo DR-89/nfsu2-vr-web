@@ -34,8 +34,11 @@ async function page() {
 /** a toast at button id, and the toasts there are once it has settled (its fade-in moves it 4 px) */
 const toast = (p, id, text, ms) => p.evaluate(async ([id, text, ms]) => {
   /** @type {any} */ (window).C.copyToast(document.getElementById(id), text, ms);
-  await new Promise(r => setTimeout(r, 250));
+  // copyToast adds .on in the next animation frame. Wait for that frame and
+  // the actual CSS transitions, even when other browser tests occupy the GPU.
+  await new Promise(r => requestAnimationFrame(r));
   const els = [...document.querySelectorAll('.copy-toast')];
+  await Promise.all(els.flatMap(e=>e.getAnimations().map(a=>a.finished.catch(()=>{}))));
   return els.map(e => { const r = e.getBoundingClientRect(); return { text: e.textContent, x: r.x, y: r.y, w: r.width, h: r.height, below: e.classList.contains('below'), top: e.matches(':popover-open') }; });
 }, [id, text, ms]);
 

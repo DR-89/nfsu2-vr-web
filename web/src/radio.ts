@@ -1,10 +1,11 @@
 // The radio: the game's own EA Trax plays the music files of a folder on this device.  The game asks for a track when it starts a song
 // (runtime/radio.c, through RadioLink); this decodes the next one of the place the song is for (0 menus, 1 driving) and hands the sound over.
-// Each track has a mode (Menu, Race, All, Off) and each place its own queue, which goes on from where it stopped last time, or plays at random
-// when the player asks for Shuffle.  Nothing here runs until the radio is used.
+// Each track has a mode (Menu, Race, All, Off) and each place its own shuffled queue. With Shuffle off it continues in folder order.
+// Nothing here runs until the radio is used.
 import type { Lines, Place, RadioLink } from './app/radio-link';
-import { keptFolder, keepFolder, reopenFolder, sortedTracks, subfolderOf, type Folder, type Picked } from './radio-folder';
+import { keptFolder, keepFolder, forgetFolder, reopenFolder, sortedTracks, subfolderOf, type Folder, type Picked } from './radio-folder';
 import { plaqueTags, tagsOf } from './radio-tags';
+import { ShuffleOrder } from './radio-order';
 import { localStore, RADIO_MODES, RADIO_NEXT, RADIO_ON, RADIO_SHUFFLE } from './app/prefs';
 
 export type Mode = 'menu' | 'racing' | 'all' | 'off';
@@ -12,7 +13,7 @@ export const MODES: readonly Mode[] = ['menu', 'racing', 'all', 'off'];
 export type PickFolder = () => Promise<Picked | null>;
 export const radioWasOn = () => localStore.get(RADIO_ON) === '1';
 const keepRadioOn = (on: boolean) => localStore.set(RADIO_ON, on ? '1' : '0');
-const readShuffle = () => localStore.get(RADIO_SHUFFLE) === '1';
+const readShuffle = () => localStore.get(RADIO_SHUFFLE) !== '0';
 const readNext = (): unknown[] => { const kept = localStore.getJSON(RADIO_NEXT); return Array.isArray(kept) ? kept : []; };
 const readModes = (): Map<string, Mode> => {
   const kept = Object.entries(localStore.getJSON(RADIO_MODES) ?? {});
@@ -33,15 +34,49 @@ export class Radio {
   private timer: ReturnType<typeof setInterval> | null = null;
   private epoch = 0;                      // counts starts and stops: work begun before a stop or restart gives up
   private live = false;                   // the game has been told the radio is on
+  private external = false;              // browser video owns music; game sound effects keep playing
+  private sourcePaused=false;
+  private sourceQuiet=false;
+  private sourceForce=false;
+  private sourceFailed=false;
+  /** Temporarily select the stock soundtrack without changing the player's
+   * folder, playlist or remembered Radio switch. Custom-only menus stay quiet. */
+  pauseForSource(paused:boolean,quiet:boolean,force=false):void {
+    quiet=paused&&quiet;
+    if(paused===this.sourcePaused&&quiet===this.sourceQuiet&&force===this.sourceForce)return;
+    this.sourcePaused=paused;this.sourceQuiet=quiet;this.sourceForce=force;
+    if(paused){this.stop();this.sourceSilence();}
+    else if(this.external)this.externalMusic();
+    else if(radioWasOn()||force&&this.usable)void this.start();
+  }
+  private sourceSilence():void {
+    if(this.sourcePaused&&this.sourceQuiet){const link=this.port();if(link){link.setPlaces([null,null]);link.setOn(true);}}
+  }
+  clearSource():void {this.sourcePaused=this.sourceQuiet=this.sourceForce=false;this.stop();}
+  get externalPlayback() { return this.external; }
+  setExternalPlayback(on: boolean) {
+    if (on === this.external) return;
+    this.stop(); this.external = on;
+    if (on) this.externalMusic();
+  }
+  private externalMusic() {
+    if(this.sourcePaused){this.sourceSilence();return;}
+    const link = this.port();
+    if (link) { link.setPlaces([null, null]); link.setOn(true); }
+  }
   private seq = 0;
+  private seeking:{seq:number;track:number;frame:number}|null=null;
   private bad = 0;
   private song: { left: Float32Array; right: Float32Array; at: number } | null = null;
   private decoder: OfflineAudioContext | null = null;
   private decoding: Promise<unknown> = Promise.resolve();   // the decode under way: one track is decoded at a time
   private next: Pair = [0, 0];            // per place: where its queue goes on
-  private last: Pair = [-1, -1];          // per place: the track chosen last, which Shuffle does not repeat at once
+  private order = [new ShuffleOrder(), new ShuffleOrder()];
+  private previous: Pair = [-1, -1];     // a cockpit Previous command awaiting the game's track request
   private shuffled = readShuffle();
   private offered: Pair = [-1, -1];       // per place: the track whose tags the game was shown
+  private offerGeneration=0;
+  private controls:Promise<void>=Promise.resolve();
   private tags = new Map<number, { own: Promise<Lines>; plaque: Promise<Lines> }>();   // per track: its tags as read, and as the plaque shows them
   private playing: { index: number; place: Place } | null = null;
   private track: { tags: Promise<Lines>; plaque: Promise<Lines>; seconds: number } | null = null;
@@ -51,8 +86,20 @@ export class Radio {
 
   get folder() { return this.name; }
   get on() { return this.timer !== null; }
+  get timeline() {
+    const link=this.port(),song=this.song;
+    return song&&this.on&&link?.request().seq===this.seq?{id:`folder:${this.epoch}:${this.seq}`,current:(this.seeking?.frame??link.position)/RATE,duration:song.left.length/RATE,seekable:link.seekable}:null;
+  }
+  seek(seconds:number,id:string):boolean {
+    const link=this.port(),track=this.timeline;
+    if(!link||!track?.seekable||track.id!==id||!Number.isFinite(seconds)||this.seeking)return false;
+    const frame=Math.max(0,Math.min(this.song!.left.length-1,Math.floor(seconds*RATE))),seq=link.requestSeek(this.seq,frame);
+    if(seq)this.seeking={seq,track:this.seq,frame};
+    return !!seq;
+  }
   /** The tracks as paths in the folder ("a.mp3", "Album/a.mp3") in playlist order; the same array until another folder is chosen. */
   get trackPaths() { return this.paths; }
+  get usable():boolean{return this.files.length>0&&!this.sourceFailed;}
   get shuffle() { return this.shuffled; }
   /** The track served last (Last.fm's scrobbles, lastfm.ts): its own tags, the lines the game's plaque shows of them (the runtime's
    *  song_text), its length in seconds. */
@@ -60,12 +107,14 @@ export class Radio {
   mode(name: string): Mode { return this.modes.get(name) ?? 'all'; }
   private suits(name: string, place: Place) { const m = this.mode(name); return m === 'all' || m === (place ? 'racing' : 'menu'); }
   private saveModes() { localStore.setJSON(RADIO_MODES, Object.fromEntries(this.modes)); }
-  private fail = (e: unknown) => this.stop(`error: ${e}`);
+  private fail = (e: unknown) => {this.sourceFailed=true;this.stop(`error: ${e}`);};
 
-  /** Shuffle on: the next track of a place is any that suits it but the last one; off: the queue goes on from where it stood. */
+  /** Shuffle visits each eligible track once per round; off resumes folder order. */
   setShuffle(on: boolean) {
     if (on === this.shuffled) return;
     this.shuffled = on;
+    this.order = [new ShuffleOrder(), new ShuffleOrder()]; this.previous = [-1, -1];
+    if(on&&this.playing){const {place,index}=this.playing;this.order[place].peek(this.eligible(place));this.order[place].played(index);}
     localStore.set(RADIO_SHUFFLE, on ? '1' : '0');
     this.log(`player sets shuffle ${on ? 'on' : 'off'}`);
     if (this.on) void this.offer().catch(this.fail);
@@ -103,9 +152,11 @@ export class Radio {
   }
 
   private setFiles(p: { files: readonly FileSystemFileHandle[]; paths?: readonly string[] }) {
+    this.sourceFailed=false;
     ({ files: this.files, paths: this.paths } = sortedTracks(p.files, p.paths));
     const kept = readNext();
-    this.next = [0, 1].map(place => Math.max(0, this.paths.indexOf(String(kept[place])))) as Pair; this.last = [-1, -1]; this.tags = new Map();
+    this.next = [0, 1].map(place => Math.max(0, this.paths.indexOf(String(kept[place])))) as Pair;
+    this.order = [new ShuffleOrder(), new ShuffleOrder()]; this.previous = [-1, -1]; this.tags = new Map();
     if (!this.paths.length) return;
     const gone = [...this.modes.keys()].filter(k => !this.paths.includes(k));
     gone.forEach(k => this.modes.delete(k));
@@ -116,7 +167,7 @@ export class Radio {
     this.setFiles(p);
     this.name = p.name;
     this.handle = p.handle ?? null;
-    if (p.handle) void keepFolder(p.handle);
+    if (p.handle) void keepFolder(p.handle); else void forgetFolder();
     this.log(`folder chosen, ${this.files.length} tracks`);
     if (this.on) { this.stop('the folder changed'); void this.start(); }
   }
@@ -136,7 +187,9 @@ export class Radio {
     keepRadioOn(this.on);
   }
 
-  turnOff() { this.stop(); keepRadioOn(false); }
+  enableForNextGame() { keepRadioOn(true); void this.start(); }
+
+  turnOff() { this.stop(); keepRadioOn(false); if (this.external) this.externalMusic(); }
 
   /** A game starts and the radio was left on. */
   async resume() { await this.restored; await this.start(); }
@@ -146,13 +199,13 @@ export class Radio {
     localStore.setJSON(RADIO_NEXT, this.next.map(i => this.paths[i % n]));
   }
 
-  /** The next track of the place from where its queue stands, the first whose mode suits it; with Shuffle any that suits it but the last (-1: none). */
+  private eligible(place: Place): number[] { return [...this.paths.keys()].filter(i => this.suits(this.paths[i], place)); }
+
+  /** Preview the next eligible track without advancing either place's queue (-1: none). */
   private choose(place: Place): number {
     const n = this.files.length;
     if (this.shuffled) {
-      const fit = [...this.paths.keys()].filter(i => this.suits(this.paths[i], place)), other = fit.filter(i => i !== this.last[place]);
-      const from = other.length ? other : fit;
-      return from.length ? from[Math.floor(Math.random() * from.length)] : -1;
+      return this.order[place].peek(this.eligible(place));
     }
     for (let k = 0; k < n; k++) {
       const i = (this.next[place] + k) % n;
@@ -163,12 +216,37 @@ export class Radio {
 
   /** Shows the game the tags of the next track of each place (the same track is read once). */
   private async offer(epoch = this.epoch) {
+    const generation=++this.offerGeneration;
     const link = this.port(), files = this.files, picks: Pair = [this.choose(0), this.choose(1)];
     if (!link) return;
     const lines = await Promise.all(picks.map(i => i < 0 ? null : this.tagsFor(files, i).plaque));
-    if (epoch !== this.epoch || files !== this.files) return;
+    if (epoch !== this.epoch || files !== this.files || generation!==this.offerGeneration) return;
     this.offered = picks;
     link.setPlaces([lines[0], lines[1]]);
+  }
+
+  /** Cockpit buttons use this same queue and the game's music stream. */
+  stepTrack(direction:number):Promise<void> {
+    this.controls=this.controls.then(async()=>{
+      const link=this.port(),playing=this.playing,epoch=this.epoch;
+      if(!link||!this.on||!playing)return;
+      const place=playing.place,picks:[number,number]=[...this.offered];
+      if(direction<0&&this.shuffled)picks[place]=this.order[place].previous(this.eligible(place));
+      else if(direction<0){
+        const n=this.paths.length;
+        for(let k=1;k<=n;k++){
+          const i=(playing.index-k+n)%n;
+          if(this.suits(this.paths[i],place)){picks[place]=i;break;}
+        }
+      }
+      if(picks[place]<0)return;
+      const generation=++this.offerGeneration,files=this.files;
+      const lines=await Promise.all(picks.map(i=>i<0?null:this.tagsFor(files,i).plaque));
+      if(epoch!==this.epoch||generation!==this.offerGeneration||!this.on)return;
+      this.offered=picks;link.setPlaces([lines[0],lines[1]]);
+      if(link.command('next'))this.previous[place]=direction<0&&this.shuffled?picks[place]:-1;
+    }).catch(this.fail);
+    return this.controls;
   }
 
   private tagsFor(files: FileSystemFileHandle[], i: number) {
@@ -184,9 +262,12 @@ export class Radio {
 
   /** Any failure turns only the radio off. */
   async start() {
+    if(this.sourcePaused){this.sourceSilence();return;}
+    if (this.external) { this.externalMusic(); return; }
     const link = this.port();
     if (this.on || !link || !this.files.length) return;
     const epoch = ++this.epoch;
+    this.sourceFailed=false;
     this.bad = 0;
     this.timer = setInterval(() => void this.step().catch(this.fail), STEP_MS);
     try {
@@ -199,8 +280,10 @@ export class Radio {
 
   stop(why = '') {
     if (this.timer) { clearInterval(this.timer); this.log(why ? `off: ${why}` : 'off'); }
-    this.timer = null; this.live = false; this.song = null; this.playing = null; this.epoch++;
+    this.timer = null; this.live = false; this.song = null; this.seeking=null;this.playing = null; this.epoch++;
+    this.previous = [-1, -1];
     try { this.port()?.setOn(false); } catch (e) { this.log(`the switch was not written: ${e}`); }
+    this.sourceSilence();
   }
 
   /** The game starts a song: decode the track offered for its place (the next one when a file does not read); then keep the rings full. */
@@ -209,12 +292,22 @@ export class Radio {
     if (!link) return;
     if (this.live && !link.isOn()) return this.stop('the game switched it off');
     const want = link.request();
-    if (want.seq === this.seq) { if (this.song) this.feedOrSkip(link); return; }
+    if (want.seq === this.seq) {
+      const seek=this.seeking;
+      if(seek){
+        if(!link.seekAcknowledged(seek.seq))return;
+        if(this.song&&seek.track===this.seq){link.beginSeek(seek.frame);this.song.at=seek.frame;this.feedOrSkip(link);link.finishSeek(seek.seq);}
+        this.seeking=null;return;
+      }
+      if (this.song) this.feedOrSkip(link); return;
+    }
     const place = want.place, where = place ? 'driving' : 'menus';
-    this.seq = want.seq; this.song = null; this.playing = null;
+    this.seq = want.seq; this.song = null; this.seeking=null;this.playing = null;
     let i = this.offered[place];
+    const backwards = this.previous[place] === i; this.previous[place] = -1;
     for (let tried = 0; i >= 0 && tried < this.files.length && this.bad < this.files.length; tried++, i = this.choose(place)) {
-      this.next[place] = i + 1; this.last[place] = i; this.keepNext();
+      this.next[place] = i + 1; this.keepNext();
+      if(this.shuffled)this.order[place].played(i, backwards && tried === 0);
       const got = await this.load(link, want.seq, i, epoch);
       if (got === 'stale') return;
       if (got === 'played') {
@@ -225,7 +318,7 @@ export class Radio {
       }
     }
     link.fail(want.seq);
-    if (i >= 0) this.stop('no file of the folder plays');
+    if (i >= 0) {this.sourceFailed=true;this.stop('no file of the folder plays');}
     else { this.log(`silence: no track fits ${where}`); void this.offer(epoch).catch(this.fail); }
   }
 
@@ -262,7 +355,7 @@ export class Radio {
     }
   }
 
-  /** Hands the rings what they take; the sound is let go of when its last frame is in. */
+  /** Keep this decoded song until it changes, so seeking never decodes twice. */
   private feed(link: RadioLink) {
     const s = this.song;
     if (!s) return;
@@ -271,6 +364,6 @@ export class Radio {
       if (!link.push(s.left.subarray(s.at, s.at + n), s.right.subarray(s.at, s.at + n))) throw new Error('the rings are not where they should be');
       s.at += n;
     }
-    if (s.at >= s.left.length) { this.song = null; this.bad = 0; }
+    if (s.at >= s.left.length) this.bad = 0;
   }
 }

@@ -51,6 +51,34 @@
 #include "guest.h"
 #include "game.h"
 #include <stdio.h>
+#ifdef __wasm__
+#include "web/vr_web.h"
+#endif
+
+/* Replay owns a separate camera selection. Keep its manual choice across
+ * snapshot restores, and restore the driving cockpit choice on destruction,
+ * even if the next viewer is allocated at the same address. */
+void sub_004a4b70_orig(CPU *c);
+void sub_004a4b70(CPU *c){
+#ifdef __wasm__
+    vr_web_replay_end(c->ecx);
+#endif
+    sub_004a4b70_orig(c);
+}
+void sub_005fafd0_orig(CPU *c);
+void sub_005fafd0(CPU *c){
+#ifdef __wasm__
+    if(vr_web_replay_cycle(c,c->ecx)){POP32(c->eip);return;}
+#endif
+    sub_005fafd0_orig(c);
+}
+void sub_005fb050_orig(CPU *c);
+void sub_005fb050(CPU *c){
+#ifdef __wasm__
+    if(vr_web_replay_update(c,c->ecx)){POP32(c->eip);return;}
+#endif
+    sub_005fb050_orig(c);
+}
 
 #define VIEW_LAST  4u                /* the drift camera */
 #define VIEW_TO    3u                /* what the setups make of it */
@@ -70,6 +98,11 @@ static struct {
 void sub_00502540_orig(CPU *c);
 void sub_00502540(CPU *c){
     uint32_t ps = c->ecx, step = MR32(c->esp + 4u), v = MR32(ps + PS_VIEW);
+#ifdef __wasm__
+    int vr_web_cycle(uint32_t, int, unsigned);
+    if (vr_web_cycle(ps, (int32_t)step, VIEW_LAST)) v = MR32(ps + PS_VIEW);
+    else
+#endif
     if (step == 1u){ v++; if ((int32_t)v > (int32_t)VIEW_LAST) v = 0; MR32(ps + PS_VIEW) = v; }
     else if (step == 0xffffffffu){ v--; MR32(ps + PS_VIEW) = (int32_t)v < 0 ? VIEW_LAST : v; }
     else MR32(ps + PS_VIEW) = v;

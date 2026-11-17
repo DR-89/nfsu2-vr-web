@@ -10,12 +10,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
+import {findWasi,spawnBuild} from '../tools/build-tools.mjs';
 import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const hasWasi = fs.readdirSync(path.join(REPO, 'deps')).some(d => d.startsWith('wasi-sdk-'));
-const sh = (script, env = {}) => spawnSync('bash', [path.join(REPO, script)], { cwd: REPO, encoding: 'utf8', timeout: 300_000, env: { ...process.env, ...env } });
+const WASI = findWasi(REPO), hasWasi = !!WASI;
+const sh = (script, env = {}) => spawnBuild('bash', [path.join(REPO, script)], { cwd: REPO, encoding: 'utf8', timeout: 300_000, env: { ...process.env, WASI, ...env } });
 
 test('aliasguard: the guest access macros keep their may_alias types', { skip: !hasWasi && 'no wasi-sdk in deps/' }, () => {
   const r = sh('web/tools/aliasguard.sh');

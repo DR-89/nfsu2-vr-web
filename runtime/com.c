@@ -22,6 +22,7 @@ static int VB(void){ if(g_verbose<0) g_verbose = ENVC("VERBOSE")?1:0; return g_v
 /* Metal bridge (metal.m) - inert when absent */
 int  metal_available(void);
 void metal_set_clear_color(unsigned argb);
+void metal_set_cull(unsigned mode);
 void metal_present(void);
 long metal_frames(void);
 long metal_tris(void);
@@ -1060,6 +1061,9 @@ static uint32_t g_psc_max = 0;                   /* highest index seen + 1 */
 static uint32_t g_psc_drop = 0;                  /* writes above 32 (dropped) */
 static int      g_cur_ps_id = 0;                 /* active ps id */
 static int      g_psn = 0;                       /* number of registered ps */
+#ifdef __wasm__
+static uint8_t g_ps_stages[256];
+#endif
 static uint64_t g_stage_hist[4] = {0,0,0,0};
 static float g_rmin[3] = { 1e30f, 1e30f, 1e30f };
 static float g_rmax[3] = { -1e30f, -1e30f, -1e30f };
@@ -1433,6 +1437,14 @@ static void vsk_copy_used(VSConst *dst, const VSConst *src, const VSProg *prog){
 /* The constant register of the position matrix differs per shader; resolve
  * it once and keep it (-2 = not looked up yet). */
 static int8_t g_pos_cx[MAXVS], g_pos_cy[MAXVS], g_pos_cw[MAXVS]; static uint8_t g_pos_seen[MAXVS];
+static void position_rows(unsigned vs, const VSProg *prog){
+    if (g_pos_seen[vs]) return;
+    int w = -1, x = vs_pos_creg(prog, &w), y = vs_pos_creg_y(prog);
+    g_pos_cx[vs] = (int8_t)((x >= 0 && x <= 120) ? x : -1);
+    g_pos_cy[vs] = (int8_t)((y >= 0 && y <= 121) ? y : -1);
+    g_pos_cw[vs] = (int8_t)((w >= 0 && w <= 123) ? w : -1);
+    g_pos_seen[vs] = 1;
+}
 static unsigned long g_asp_np[MAXVS], g_asp_no[MAXVS]; static float g_asp_cw3[MAXVS];
 /* WSLOG=1 (diagnostic): first draw of every (target, shader, kind) with the
  * position rows, so it is visible which passes the aspect fix touches. */
@@ -1460,13 +1472,7 @@ static const VSConst *aspect_apply(const VSConst *vsk, const VSProg *prog){
     if (g_aspfix == 1.f || !prog) return vsk;
     unsigned vs = g_cur_vs;
     if (vs >= MAXVS) return vsk;
-    if (!g_pos_seen[vs]){
-        int w = -1; int x = vs_pos_creg(prog, &w), y = vs_pos_creg_y(prog);
-        g_pos_cx[vs] = (int8_t)((x >= 0 && x <= 120) ? x : -1);
-        g_pos_cy[vs] = (int8_t)((y >= 0 && y <= 121) ? y : -1);
-        g_pos_cw[vs] = (int8_t)((w >= 0 && w <= 123) ? w : -1);
-        g_pos_seen[vs] = 1;
-    }
+    position_rows(vs, prog);
     int cx = g_pos_cx[vs], cy = g_pos_cy[vs], cw = g_pos_cw[vs];
     if (cx < 0 || cw < 0){ g_asp_ortho++; ws_log_draw("none", vsk, cx, cw); return vsk; }
     /* Perspective?  oPos.w = dot(v, c[cw]).  In an orthographic/screen matrix
@@ -1696,6 +1702,34 @@ static void draw_lines(const TVert *tv, uint32_t nv, uint32_t pt){
  * it returns 0 and the caller falls back to the old (index expansion) path. */
 static struct { uint32_t n, vbo, ibo, isz; int32_t base; uint64_t gh; } g_ix;
 static uint64_t g_dip_ix = 0, g_dip_ixfb[6];
+#ifdef __wasm__
+#include "web/vr_web.h"
+#include "web/vr_occlusion.h"
+/* Both the indexed pool and the expanded fallback reach this point. Require
+ * the complete eight-vertex/four-triangle proxy, never a broad seat cutout. */
+static int vr_cards(uint32_t vp, uint32_t stride, int offset, int type){
+    if ((type != 2 && type != 3) || offset < 0 || (unsigned)offset + (type == 3 ? 16u : 12u) > stride) return 0;
+    const uint8_t *metal_pool_cpu(void);
+    const uint8_t *pool = g_ix.n ? metal_pool_cpu() : NULL;
+    if (g_ix.n && !pool) return 0;
+    float positions[8][4]; uint32_t indices[12]; unsigned used = 0;
+    for (unsigned i = 0; i < 12; i++) {
+        const uint8_t *p;
+        if (pool) {
+            const uint8_t *ib = pool + g_ix.ibo + i*g_ix.isz;
+            uint32_t index = 0;
+            if (g_ix.isz == 2) { uint16_t x; memcpy(&x, ib, 2); index = x; }
+            else memcpy(&index, ib, 4);
+            p = pool + g_ix.vbo + ((size_t)index + g_ix.base)*stride + offset;
+        } else p = g_mem + vp + i*stride + offset;
+        float point[4] = {0,0,0,1}; memcpy(point, p, type == 3 ? 16u : 12u);
+        unsigned v = 0; for (; v < used; v++) if (!memcmp(positions[v], point, 16)) break;
+        if (v == used) { if (used == 8) return 0; memcpy(positions[used++], point, 16); }
+        indices[i] = v;
+    }
+    return used == 8 && vr_driver_cards(positions, indices);
+}
+#endif
 static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
     uint64_t _t0 = now_ns();
     static TVert tv[4096];
@@ -1707,6 +1741,31 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
     const VSProg *prog = (g_cur_vs && g_cur_vs < MAXVS) ? g_vsprog[g_cur_vs] : 0;
     vsk = fixmat_apply(vsk);
     g_ui_clip = 1.f;
+#ifdef __wasm__
+    /* Semantic FEng scope plus screen/orthographic state. A 3D frontend
+     * object or a full-target effect still belongs to the scene. */
+    uint32_t rear_target=vr_web_mirror_target();
+    if(rear_target){
+        /* Original flat HUD mirror and its rounded screen mask are replaced
+         * by actual glass polygons. Preserve perspective sky/world draws. */
+        if(g_cur_tex==rear_target && g_cur_rt!=rear_target)return 1;
+        if(g_cur_rt==rear_target && vr_web_mirror_mask(g_cur_tex))return 1;
+    }
+    int hud = vr_web_ui_active() && !g_cur_rt && !g_rs[7] && !g_rs[52] && !ws_fill_target();
+    int perspective=0;
+    if (prog && g_cur_vs < MAXVS) {
+        position_rows(g_cur_vs, prog);
+        int cw = g_pos_cw[g_cur_vs];
+        float axis=cw>=0?fabsf(vsk->f[cw][0])+fabsf(vsk->f[cw][1])+fabsf(vsk->f[cw][2]):-1.f;
+        perspective=isfinite(axis) && axis>=1e-6f;
+        if(hud)hud=cw>=0 && axis>=0 && axis<1e-6f;
+    }
+    /* Clip-space ownership survives either vertex path, including CPU shader
+     * fallback and widened lines. A full-target screen effect has constant w
+     * and must retain its screen coordinates in each eye. */
+    void metal_set_vr_draw(int,int); metal_set_vr_draw(hud,perspective);
+    if (!hud)
+#endif
     vsk = aspect_apply(vsk, prog);
 #ifdef __wasm__
     { void metal_set_ui_clip(float); metal_set_ui_clip(g_ui_clip); }
@@ -1776,6 +1835,63 @@ static int draw_up(uint32_t pt, uint32_t nv, uint32_t vp, uint32_t stride){
     const DElem *el = dcc[dci].el; int nel = dcc[dci].nel;
     int p_off = dcc[dci].p_off, p_type = dcc[dci].p_type, c_off = dcc[dci].c_off,
         c_type = dcc[dci].c_type, t_off = dcc[dci].t_off, t_type = dcc[dci].t_type;
+
+#ifdef __wasm__
+    int body = 0;
+    if (prog && g_rs[7] && g_cur_zid && g_cur_vs < MAXVS) {
+        position_rows(g_cur_vs, prog);
+        int x = g_pos_cx[g_cur_vs], y = g_pos_cy[g_cur_vs], w = g_pos_cw[g_cur_vs];
+        if (x >= 0 && y >= 0 && w >= 0) body = vr_web_body_matrix(g_vsk.f[x], g_vsk.f[y], g_vsk.f[w]);
+        if(!body && x>=0 && y>=0 && w>=0 && g_rs[14] && !g_rs[27] && pt==4u && nv==12u && vr_cards(vp,stride,p_off,p_type)){
+            int split_render_view(void);void metal_set_vr_driver(unsigned);
+            metal_set_vr_driver(vr_web_driver_matrix((uint32_t)split_render_view(),g_vsk.f[x],g_vsk.f[y],g_vsk.f[w]));
+        }
+        if (vr_web_trace_body() && (body || (w >= 0 && fabsf(g_vsk.f[w][3]) < 3.f))) fprintf(stderr,
+            "[vr-body] pass body=%d rt=%u tex=%u,%u,%u,%u vs=%u n=%u rows=%d,%d,%d x=[%.3f %.3f %.3f %.3f] y=[%.3f %.3f %.3f %.3f] w=[%.3f %.3f %.3f %.3f]\n",
+            body,g_cur_rt,g_tex_stage[0],g_tex_stage[1],g_tex_stage[2],g_tex_stage[3],g_cur_vs,nv,x,y,w,
+            x>=0?g_vsk.f[x][0]:0,x>=0?g_vsk.f[x][1]:0,x>=0?g_vsk.f[x][2]:0,x>=0?g_vsk.f[x][3]:0,
+            y>=0?g_vsk.f[y][0]:0,y>=0?g_vsk.f[y][1]:0,y>=0?g_vsk.f[y][2]:0,y>=0?g_vsk.f[y][3]:0,
+            w>=0?g_vsk.f[w][0]:0,w>=0?g_vsk.f[w][1]:0,w>=0?g_vsk.f[w][2]:0,w>=0?g_vsk.f[w][3]:0);
+    }
+    /* The retail roof and pillars have outside-facing triangles only. The
+     * seated player's shell is two-sided; every other draw keeps its cull. */
+    metal_set_cull(body ? 1u : (g_rs[22] ? g_rs[22] : 3u));
+    if (body) {
+        if(body==1 && pt==4u && nv>=6 && nv<=1536 && g_rs[14] && !g_rs[27] &&
+           (p_type==2 || p_type==3) && p_off>=0 && (unsigned)p_off+12u<=stride){
+            float positions[1536][3];
+            const uint8_t *metal_pool_cpu(void);const uint8_t *pool=g_ix.n?metal_pool_cpu():NULL;
+            for(uint32_t i=0;i<nv;i++){
+                const uint8_t *p;
+                if(pool){uint32_t ix=0;memcpy(&ix,pool+g_ix.ibo+i*g_ix.isz,g_ix.isz);p=pool+g_ix.vbo+((size_t)ix+g_ix.base)*stride+p_off;}
+                else p=g_mem+vp+i*stride+p_off;
+                float v[3];memcpy(v,p,12);positions[i][0]=-v[1];positions[i][1]=v[2];positions[i][2]=-v[0];
+            }
+            vr_web_mirror_mesh(positions,nv);
+        }
+        if (vr_web_trace_body()) {
+            float lo[3] = {1e9f,1e9f,1e9f}, hi[3] = {-1e9f,-1e9f,-1e9f};
+            const uint8_t *metal_pool_cpu(void); const uint8_t *pool = g_ix.n ? metal_pool_cpu() : NULL;
+            if ((p_type == 2 || p_type == 3) && p_off >= 0 && (unsigned)p_off + 12u <= stride) for (unsigned i=0; i<nv; i++) {
+                const uint8_t *p;
+                if (pool) { uint32_t ix=0; memcpy(&ix,pool+g_ix.ibo+i*g_ix.isz,g_ix.isz); p=pool+g_ix.vbo+((size_t)ix+g_ix.base)*stride+p_off; }
+                else p=g_mem+vp+i*stride+p_off;
+                float v[3];memcpy(v,p,12);for(int k=0;k<3;k++){lo[k]=fminf(lo[k],v[k]);hi[k]=fmaxf(hi[k],v[k]);}
+            }
+            fprintf(stderr,"[vr-body] draw tex=%u n=%u vs=%u ps=%d z=%u blend=%u/%u/%u type=%d xyz=[%.3f %.3f %.3f]..[%.3f %.3f %.3f] cards=%d\n",
+                g_cur_tex,nv,g_cur_vs,g_cur_ps_id,g_rs[14],g_rs[27],g_rs[19],g_rs[20],p_type,lo[0],lo[1],lo[2],hi[0],hi[1],hi[2],
+                pt==4u && nv==12u ? vr_cards(vp,stride,p_off,p_type):0);
+        }
+        if (!g_rs[14] && g_rs[27] && g_rs[19] == 5u && g_rs[20] == 6u) {
+            /* PC car shaders put the reflection cube at stage 0 and the
+             * actual window/paint at stage 1. Check sampled stages only. */
+            int ps = g_cur_ps_id;
+            if (ps > 0 && ps < 256) for (int s = 0; s < 4; s++)
+                if ((g_ps_stages[ps] & (1u << s)) && vr_web_window_texture(g_tex_stage[s])) return 1;
+        }
+        if (g_rs[14] && !g_rs[27] && pt == 4u && nv == 12u && vr_cards(vp, stride, p_off, p_type)) return 1;
+    }
+#endif
 
     /* ---------------- GPU vertex shader (GPUVS) ----------------
      * Measured: ~45% of the run time was in the CPU vs_run interpreter,
@@ -3887,6 +4003,7 @@ int com_call(CPU *c, uint32_t magic){
                     void metal_register_ps(int, const char *);
 #ifdef __wasm__
                     if (wgsl_dump_on()) wgsl_dump_obj("ps", id, g_mem+copy, sz, pp3);
+                    if (id < 256) g_ps_stages[id] = (uint8_t)ps_texture_stages(pp3);
                     int pl = ps_to_wgsl(pp3, id, msl, sizeof msl);
                     if (wgsl_dump_on()) wgsl_dump_ps(id, id, msl, pl);
 #else

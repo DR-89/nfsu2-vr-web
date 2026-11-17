@@ -1,3 +1,4 @@
+# Requires NFSU2_SPECIAL_VINYLS=1 for the Special category and category offsets below.
 # Art Factory 28 (the Japanese release's vinyl, runtime/vinylpacks.c) bought on the career's car and saved: the profile
 # holds the slot's stock part (none), MODPARTS.DAT the vinyl (runtime/modpacks.c).  A career save with a car (e.g.
 # work/seed/career/s4_perf2), everything unlocked, the Graphics shop, Vinyls, the bottom layer, Art Factory, its 28th

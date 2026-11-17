@@ -23,16 +23,17 @@
 # restarts nothing and only writes that file.
 #
 #   NFSU2_DIR    the folder on the VPS (default /srv/nfsu2)
-#   NFSU2_REPO   the image without its tag (default ghcr.io/th0mk/nfsu2-web-rs)
+#   NFSU2_REPO   your published fork image without its tag (required for release)
 set -euo pipefail
 
 dry=0
 [ "${1:-}" = -n ] && { dry=1; shift; }
 vps="${1:-}"; arg="${2:-}"
 dir="${NFSU2_DIR:-/srv/nfsu2}"
-repo="${NFSU2_REPO:-ghcr.io/th0mk/nfsu2-web-rs}"
+repo="${NFSU2_REPO:-}"
 die(){ echo "release: $*" >&2; exit 1; }
 [ -n "$vps" ] && [ -n "$arg" ] || die "usage: release.sh [-n] user@vps <module folder> [commit] | release.sh [-n] user@vps --undo"
+[ "$arg" = --undo ] || [ -n "$repo" ] || die "set NFSU2_REPO to your published nfsu2-vr-web image"
 
 # the part that runs on the VPS: $1 what (release or undo), $2 the image, $3 the module's commit
 remote=$(cat <<'REMOTE'

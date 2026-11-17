@@ -118,7 +118,7 @@ fi
 
 # ---- 5. the server ----------------------------------------------------------------
 say "Starting the server (Ctrl-C stops it)"
-echo "  On this Mac:  http://localhost:$HTTP_PORT/"
+echo "  On this computer:  http://localhost:$HTTP_PORT/"
 if [ "$OPEN" = 1 ]; then
   ( for _ in $(seq 1 50); do curl -sf -o /dev/null "http://localhost:$HTTP_PORT/game.json" && break; sleep 0.2; done
     open -a "Google Chrome" "http://localhost:$HTTP_PORT/" 2>/dev/null || open "http://localhost:$HTTP_PORT/" ) &

@@ -114,6 +114,9 @@ impl LanSwitch {
         match place {
             Some((vip, old, resumed)) => {
                 let (peer, count) = self.seat(&mut m, conn, ctx, hello, vip, old);
+                if resumed && let Some(h) = &self.online {
+                    h.peer_resumed(vip);
+                }
                 drop(m);
                 if let Some(f) = &ctx.on_join {
                     f(peer.vip, resumed, count);
@@ -206,6 +209,9 @@ impl LanSwitch {
             greet(&peer, h, self.o.fpred, self.o.probe_echo);
             self.hand_hub(&peer, h);
         }
+        if old.is_some() {
+            self.vr_gone(vip);
+        }
         m.peers.insert(vip, peer.clone());
         // (a replaced holder's place on it goes with it)
         m.lan.swap_remove(&vip);
@@ -258,6 +264,7 @@ impl LanSwitch {
         if !m.peers.get(&vip).is_some_and(|p| Arc::ptr_eq(p, &peer)) {
             return;
         }
+        self.vr_gone(vip);
         m.peers.shift_remove(&vip);
         m.lan.swap_remove(&vip);
         if let Some(i) = slot(vip) {

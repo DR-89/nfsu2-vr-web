@@ -269,6 +269,39 @@ fn a_game() {
     assert_eq!(w.core.lobby.games.len(), 0, "forgotten after raceMs");
 }
 
+#[test]
+fn avatar_membership_uses_joined_rosters_and_never_recycled_connections() {
+    let mut w = world();
+    let (ga, gb, gc) = (w.client("10.77.0.2"), w.client("10.77.0.3"), w.client("10.77.0.4"));
+    let a = w.login(ga, "Alpha");
+    let b = w.login(gb, "Bravo");
+    let _c = w.login(gc, "Charlie");
+    let ids = [ga, gb, gc];
+    assert!(w.core.avatar_links(&ids).pairs.is_empty());
+    assert_eq!(w.core.avatar_links(&ids).managed.len(), 3);
+    w.send(a, "gcre", fields![("NAME", "Private"), ("PASS", "test"), ("MINSIZE", 2), ("PARAMS", "TRACK=4011")]);
+    w.send(b, "gjoi", fields![("NAME", "Private"), ("PASS", "wrong")]);
+    assert!(w.core.avatar_links(&ids).pairs.is_empty());
+    w.send(b, "gjoi", fields![("NAME", "Private"), ("PASS", "test")]);
+    assert_eq!(w.core.avatar_links(&ids).pairs, vec![(ga, gb), (gb, ga)]);
+    assert!(w.core.avatar_links(&[ga]).pairs.is_empty());
+    w.send(a, "gset", fields![("NAME", "Private"), ("USERFLAGS", 134217728)]);
+    w.send(b, "gset", fields![("NAME", "Private"), ("USERFLAGS", 134217728)]);
+    w.send(a, "gsta", fields![("NAME", "Private")]);
+    assert!(w.c(a).last("+ses").is_some());
+    w.close(a);
+    w.close(b);
+    assert_eq!(w.core.avatar_links(&ids).pairs, vec![(ga, gb), (gb, ga)], "ordinary lobby TCP closure keeps the actual race");
+    w.peer_gone(gb);
+    assert!(w.core.avatar_links(&ids).pairs.is_empty());
+    w.core.peer_resumed(gb);
+    assert_eq!(w.core.avatar_links(&ids).pairs, vec![(ga, gb), (gb, ga)], "only a token-verified resume restores the current race");
+    w.peer_gone(gb);
+    let reused = w.client("10.77.0.3");
+    let _new = w.login(reused, "Different");
+    assert!(w.core.avatar_links(&ids).pairs.is_empty(), "a saved race is not permission for a new occupant of its address");
+}
+
 // game passwords: listed with the password bit, asked for on every join (by name or id), in no reply, log or record
 #[test]
 fn game_passwords() {

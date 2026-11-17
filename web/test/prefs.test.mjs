@@ -76,11 +76,16 @@ test('the store is looked up at each call (blocked later, or a test\'s own)', ()
 test('the keys, as players\' browsers keep them', () => {
   const keys = Object.fromEntries(Object.entries(P).filter(([, v]) => typeof v === 'string'));
   assert.deepEqual(keys, {
+    CONNECTION_AUTH_DB: 'nfsu2-vr-connection-auth-v1',
     PAGE_LANGUAGE: 'nfsu2-page-language', PAGE_TAB: 'nfsu2.page.tab', PAGE_ID: 'nfsu2.net.page-id',
     SEEN_SETTINGS: 'nfsu2.seen.settings', LOG_SALT: 'nfsu2.logsalt', DEVICE_RENDER: 'nfsu2.device.render',
+    VR_RENDER_PIXELS: 'nfsu2.vr.render-pixels.v1',
+    VR_HAPTICS_BRIDGE: 'nfsu2.vr.haptics-bridge.v1',
+    VR_HAPTICS_AUTO: 'nfsu2.vr.haptics-auto.v1',
     GPU_PIPELINES: 'nfsu2.gpu.pipelines.v1', LAST_GAME: 'nfsu2.lastgame.',
     PLAY_MS: 'nfsu2.play.ms', PLAY_SMS: 'nfsu2.play.sms', PLAY_GAMES: 'nfsu2.play.games', PLAY_LAST: 'nfsu2.play.last',
     PLAY_FROM: 'nfsu2.play.from',
+    MEDIA_FOLDER_DB: 'nfsu2.radio', RADIO_FOLDER: 'folder', MEDIA_FOLDER: 'media-folder',
     RADIO_MODES: 'nfsu2.radio.modes', RADIO_ON: 'nfsu2.radio.on', RADIO_NEXT: 'nfsu2.radio.next', RADIO_SHUFFLE: 'nfsu2.radio.shuffle',
     LASTFM_SESSION: 'nfsu2.lastfm', LASTFM_QUEUE: 'nfsu2.lastfm.queue', LASTFM_RESULT: 'nfsu2.lastfm.result',
     PHOTO_KEPT: 'nfsu2-photo', PHOTO_MARK: 'nfsu2-photo-mark', MESSAGES: 'nfsu2.msgs.',

@@ -39,6 +39,7 @@
 #include "coop.h"
 #include "splitscreen_mem.h"
 #include "stance.h"
+#include "stance_models.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -120,11 +121,34 @@ typedef struct { uint32_t handle, type; StanceV v; } Entry;
 /* each player's cars with a stance of their own, of the profile name (that player's profile then; "" none) */
 static struct { Entry e[STANCE_CARS]; int n; char name[33]; } g_cars[2];
 static StanceV g_friend[STANCE_FRIENDS]; static uint32_t g_friend_car[STANCE_FRIENDS];
+static StanceModels g_models;
+static int g_on=-1;
 
 int stance_on(void){
-    static int on = -1;
-    if (on < 0){ on = setting_bool("NFSU2_STANCE", 0); fprintf(stderr, "[stance] %s\n", on ? "on: Body Shop, Stance" : "off: every car of ours as the game draws it"); }
-    return on;
+    if (g_on < 0){
+        g_on=setting_bool("NFSU2_STANCE",0);
+        const char *models=getenv("NFSU2_STANCE_MODELS");
+        if(models && !stance_models_parse(models,&g_models))fprintf(stderr,"[stance] invalid model defaults ignored\n");
+        fprintf(stderr, "[stance] %s\n", g_on ? "on: Body Shop, Stance" : "off: every car of ours as the game draws it");
+    }
+    return g_on;
+}
+int stance_configure(const char *models,int enabled){
+    StanceModels next;
+    if((enabled!=0&&enabled!=1) || !stance_models_parse(models,&next))return 0;
+    (void)stance_on();
+    g_models=next;g_on=enabled;
+    fprintf(stderr,"[stance] model defaults: %u, %s\n",g_models.count,g_on?"on":"off");
+    return 1;
+}
+static const StanceV *model_type(uint32_t hash){
+    uint32_t types=guest_rd32(G_CARTYPES);
+    if(!hash || !guest_ok_bytes(types,CARTYPES_N*CARTYPE_SZ))return 0;
+    for(unsigned i=0;i<CARTYPES_N;i++){
+        uint32_t t=types+i*CARTYPE_SZ;
+        if(MR32(t+CARTYPE_HASH)==hash){char name[16];guest_read_str(t,name,sizeof name);return stance_models_find(&g_models,name);}
+    }
+    return 0;
 }
 int stance_ok(const StanceV *v){
     return v->fc >= STANCE_CAMBER_MIN && v->fc <= STANCE_CAMBER_MAX && v->rc >= STANCE_CAMBER_MIN && v->rc <= STANCE_CAMBER_MAX
@@ -179,6 +203,8 @@ const StanceV *stance_mine(int p){
     if (!stance_on()) return 0;
     if (!p && test_mine()) return test_mine();
     uint32_t h = driven(p), r = record(p, h);
+    const StanceV *model=r?model_type(modparts_car_type(p,r)):0;
+    if(model)return model;
     Entry *e = entry(p, h);
     return e && r && modparts_car_type(p, r) == e->type ? &e->v : 0;   /* (its car type as set: not a car changed elsewhere) */
 }
@@ -186,6 +212,20 @@ const StanceV *stance_mine(int p){
 static float game_camber(uint32_t ride){
     if (!guest_ok(ride, RIDE_PLATES)) return 0;
     return GAME_CAMBER * (0.5f * (MR8(ride + RIDE_COILOVERS) != 0) + 0.5f * (MR8(ride + RIDE_PLATES) != 0));
+}
+int stance_snapshot(uint32_t car,StanceV *value,int *stock_front){
+    if(!value||!stock_front||!guest_ok(car,CAR_RIDE+4u))return 0;
+    uint32_t type=guest_rd32(car+CAR_TYPEINFO),ride=guest_rd32(car+CAR_RIDE);
+    if(!guest_ok(type,CARTYPE_HASH+4u)||!guest_ok(ride,RIDE_PLATES+1u))return 0;
+    (void)stance_on();
+    *stock_front=(int)lroundf(game_camber(ride)*10);
+    *value=(StanceV){(int16_t)*stock_front,0,0,0,100};
+    uint32_t h=driven(0),r=record(0,h),hash=MR32(type+CARTYPE_HASH);
+    Entry *e=entry(0,h);
+    if(e&&r&&e->type==hash&&modparts_car_type(0,r)==hash)*value=e->v;
+    char name[16];guest_read_str(type,name,sizeof name);
+    const StanceV *model=stance_models_find(&g_models,name);if(model)*value=*model;
+    return 1;
 }
 /* a new entry for handle h in player p's list, which stays in the handles' order (one order for "anything to save?"
  * whatever order the stances were set in), 0: full */
@@ -366,6 +406,7 @@ static void turn(uint32_t m, float a, float keep[12]){
 /* showoff.c's 0x620AE0, before the game's drawing and after it */
 void stance_draw_begin(CPU *c){
     D.on = 0;
+    if(!stance_on())return;
     uint32_t ri = c->ecx;
     if (!guest_ok(ri, RI_TIRE_W + 0x10u)) return;
     const StanceV *s = of_drawn(ri);
@@ -634,7 +675,7 @@ static void rating_show(CPU *c, uint32_t pkname){
 }
 void stance_frame(CPU *c){
     static int dumped, was_open, gone; static uint32_t pkname, rpkname;
-    if (!stance_on()) return;
+    if (!stance_on() && !M.open && !was_open && !G.going) return;
     if (G.going && autotest_frame() - G.since > FADE_FRAMES){
         G.going = 0; MR8(G_RIMS_GO) = 0;
         fprintf(stderr, "[stance] f=%ld the Body Shop's fade to Stance never ended: not going\n", autotest_frame());

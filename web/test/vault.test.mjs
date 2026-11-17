@@ -629,8 +629,8 @@ const fromFile = text => { const r = S.resolveEnv(text, {}, {}); return Object.f
 
 test('settings.ini without the device\'s settings, and with this browser\'s again', () => {
   const dev = S.KEYS.filter(k => k.device).map(k => k.key);
-  assert.ok(['render', 'fps', 'resolution', 'fullscreen', 'audio_latency', 'gamepad_deadzone', 'ui_textures', 'seed_registry'].every(k => dev.includes(k)));
-  assert.ok(!['roam_name', 'language', 'roam_crew', 'horn', 'movies', 'online', 'hud'].some(k => dev.includes(k)));
+  assert.ok(['render', 'fps', 'resolution', 'fullscreen', 'audio_latency', 'gamepad_deadzone', 'seed_registry'].every(k => dev.includes(k)));
+  assert.ok(!['roam_name', 'language', 'roam_crew', 'horn', 'movies', 'online', 'hud', 'ui_textures', 'roam_max_cars'].some(k => dev.includes(k)));
   assert.ok(S.KEYS.filter(k => k.device).every(k => k.scope === 'web'));
   // a phone's: its own scale, frame rate and controller, a variable of one by its own name, and a lower-case key of
   // one (pad_deadzone: NFSU2_PAD_DEADZONE); its name and language are the player's
@@ -881,4 +881,28 @@ test('sends held back while the save folder is not whole (the browser deleted it
   a.link = null;
   a.sync.keepLink();
   assert.equal(JSON.parse(a.link).rev, a.sync.link.rev);
+});
+
+
+test('VR settings travel through encrypted cloud saves and override the other device profile', async () => {
+  const srv = server(), a = browser(srv), b = browser(srv);
+  const choices = [['vr_avatars', 'off'], ['vr_share_pose', 'off'], ['vr_world_scale', '115'], ['vr_seat_height', '12'], ['vr_seat_forward', '-8'], ['vr_media_volume', '45'], ['vr_media_opacity', '70'], ['vr_cockpit','on'], ['vr_leds','on'], ['vr_led_color','6'], ['vr_led_pulse','off'], ['vr_shift_lights','off'], ['vr_haptics','off'], ['vr_screen_page','1'], ['vr_screen_movable','on'], ['vr_screen_size','150'], ['vr_screen_x','25'], ['vr_screen_y','-10'], ['vr_screen_z','15'], ['vr_screen_pitch','20'], ['vr_screen_yaw','-15']];
+  choices.push(['vr_hand_controls','off'],['vr_wheel_grip','on'],['vr_wheel_rotation','720'],['vr_steering_sensitivity','175'],['vr_steering_deadzone','8'],['vr_wheel_return','360']);
+  choices.push(['vr_shifter_mode','1'],['vr_shift_reverse','on'],['vr_shift_travel','65'],['vr_shift_gestures','2'],['vr_gesture_reverse','off'],['vr_gesture_axis','1'],['vr_shift_zone','23'],['vr_gesture_travel','75'],['vr_gesture_angle','35'],['vr_gesture_speed','80']);
+  choices.push(['vr_shift_guide','2']);
+  choices.push(['vr_master_gain','-6']);
+  choices.push(['vr_music_source','2'],['player_headlights','high'],['regional_cars','on'],['special_vinyls','on'],['ui_textures','hud'],['roam_max_cars','6']);
+  choices.push(['roam_room','XRcase7']);
+  choices.push(['stance','on'],['stance_models','v1|350Z:35,0,-40,80,130|SKYLINE:150,150,80,-40,80']);
+  choices.push(['vr_map_x','12'],['vr_map_y','-8'],['vr_map_z','25'],['vr_map_pitch','30'],['vr_map_yaw','-40'],['gps_distance','on']);
+  choices.push(['vr_engine_rumble','off'],['vr_grip_feedback','off'],['vr_shift_click','off'],['vr_shift_sound','on']);
+  choices.push(['vr_mirror_resolution','2048'],['vr_mirror_inside_yaw','-5.125'],['vr_mirror_inside_pitch','2.5'],['vr_mirror_outside_yaw','8'],['vr_mirror_outside_pitch','-4.25']);
+  choices.push(['vr_mirror_vehicle','350Z'],['vr_mirror_350z_inside_yaw','3.25'],['vr_mirror_350z_outside_pitch','-2.75'],['vr_mirror_skyline_inside_yaw','-6.5']);
+  seed(a, 1000, ini(choices));
+  const phrase = await a.sync.create(), got = await b.sync.peek(phrase);
+  b.files.set('settings.ini', enc.encode(ini([['vr_world_scale', '80'], ['fps', '30'], ['ui_textures','original'], ['roam_max_cars','16'], ['roam_room','World 2']])));
+  await b.deps.restore(got.zip); await b.sync.adopt(phrase, got.remote);
+  const env = fromFile(dec.decode(b.files.get('settings.ini')));
+  for (const [key,value] of choices) assert.equal(env['NFSU2_'+key.toUpperCase()], value === 'off' ? '0' : value === 'on' ? '1' : value);
+  assert.equal(env.NFSU2_FPS, '30');
 });

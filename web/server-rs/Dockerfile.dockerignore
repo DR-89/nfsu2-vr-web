@@ -3,6 +3,8 @@
 *
 !app/registry-defaults.txt
 !CHANGELOG.md
+!LICENSE
+!licenses/
 !runtime/flags.dat
 !web/package.json
 !web/package-lock.json

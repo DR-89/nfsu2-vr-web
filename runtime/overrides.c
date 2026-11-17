@@ -7,6 +7,7 @@
  *   2) visited set: each node at most once per top-level walk
  * That way the walk terminates and the game can make progress.            */
 #include "cpu.h"
+
 #include "game.h"
 #include "guest.h"
 #include "guest_span.h"
@@ -17,6 +18,74 @@
 #include <time.h>
 #include <unistd.h>
 #include "enhance.h"
+
+/* The web cockpit submits physical lever requests after the retail human
+ * driver's pedal/direction processing, before the gearbox consumes them. */
+void sub_0041e2c0_orig(CPU *c);
+void sub_0041e2c0(CPU *c){
+    uint32_t driver = c->ecx;
+#ifdef __wasm__
+    uint32_t vr_web_driver_before(uint32_t);
+    void vr_web_driver_after(uint32_t,uint32_t);
+    uint32_t before=vr_web_driver_before(driver);
+#endif
+    sub_0041e2c0_orig(c);
+#ifdef __wasm__
+    vr_web_driver_after(driver,before);
+#else
+    (void)driver;
+#endif
+}
+
+/* Preserve the full step before the original eight-bit replay packet is
+ * written. Reads still validate their packet type and stream exhaustion. */
+void sub_00579130_orig(CPU *c);
+void sub_00579130(CPU *c){
+#ifdef __wasm__
+    void vr_web_replay_record(uint32_t,uint32_t,uint32_t);
+    vr_web_replay_record(c->ecx,guest_rd32(c->esp),guest_rd32(c->esp+4u));
+#endif
+    sub_00579130_orig(c);
+}
+void sub_005790e0_orig(CPU *c);
+void sub_005790e0(CPU *c){
+#ifdef __wasm__
+    uint32_t vr_web_replay_ticks(uint32_t,uint32_t,uint32_t);
+    uint32_t manager=c->ecx,caller=guest_rd32(c->esp);
+#endif
+    sub_005790e0_orig(c);
+#ifdef __wasm__
+    c->eax=vr_web_replay_ticks(manager,caller,c->eax);
+#endif
+}
+
+/* Human player's stage listener unlocks the driver at stage 4 through its
+ * vtable +0x1c, which calls +0x30 to select first. Preserve both original
+ * calls and restore only a physical lever's pending neutral/first request. */
+void sub_0040a280_orig(CPU *c);
+void sub_0040a280(CPU *c){
+#ifdef __wasm__
+    uint32_t car=guest_rd32(c->ecx+4u),driver=guest_rd32(car+CAR_INPUT);
+    void vr_web_stage(uint32_t,uint32_t,uint32_t);
+    void vr_web_grid_apply(uint32_t);
+    vr_web_stage(car,guest_rd32(c->esp+4u),guest_rd32(c->esp+8u));
+#endif
+    sub_0040a280_orig(c);
+#ifdef __wasm__
+    vr_web_grid_apply(driver);
+#endif
+}
+void sub_00407310_orig(CPU *c);
+void sub_00407310(CPU *c){
+    uint32_t driver=c->ecx;
+    sub_00407310_orig(c);
+#ifdef __wasm__
+    void vr_web_grid_apply(uint32_t);
+    if(guest_rd32(driver+INPUT_GEAR_REQUEST)==2u)vr_web_grid_apply(driver);
+#else
+    (void)driver;
+#endif
+}
 
 void guest_backtrace(CPU*,int);
 
@@ -634,9 +703,27 @@ static void view_roll(uint32_t m, float a){
     }
 }
 #endif
+#ifdef __wasm__
+#include "web/vr_web.h"
+#endif
+void sub_005d6ad0_orig(CPU *c);
+void sub_005d6ad0(CPU *c){
+#ifdef __wasm__
+    vr_web_rear_world(c);
+#endif
+    sub_005d6ad0_orig(c);
+}
 void sub_005c7ec0_orig(CPU *c);
 void sub_005c7ec0(CPU *c){
     uint32_t plat = c->ecx, view = MR32(c->esp + 4u);
+#ifdef __wasm__
+    uint8_t vr_keep[CAM_VIEW_BYTES];
+    uint32_t vr_cam = guest_rd32(view + EVIEW_CAMERA);
+    int vr_changed = vr_web_camera(view, vr_cam, vr_keep);
+    /* Both optional PC arguments override NearZ (0x5c7f33/0x5c7f4c).
+     * FarZ comes from Camera+0xc0; putting it in arg 3 makes near == far. */
+    if(vr_changed==2){MRF32(c->esp+8u)=MRF32(vr_cam+CAM_NEAR);MRF32(c->esp+12u)=0.f;}
+#endif
 #ifdef __wasm__
     uint32_t cam = 0, fcam = 0; uint8_t keep[0x40]; uint16_t fov = 0, fkeep = 0;
     float pj[11] = { 0 };
@@ -673,6 +760,9 @@ void sub_005c7ec0(CPU *c){
 #else
     sub_005c7ec0_orig(c);
 #endif
+#ifdef __wasm__
+    vr_web_projection(plat, vr_changed);
+#endif
     if (view && plat && mem_is_committed(view + 0x43u) && mem_is_committed(plat + 0xbfu)){
         enh_view_setup(MR32(view + 4u), (const float *)(g_mem + plat),
                        MR32(view + 0x40u));
@@ -681,6 +771,9 @@ void sub_005c7ec0(CPU *c){
         headlights_view(MR32(view + 4u), (const float *)(g_mem + plat));
 #endif
     }
+#ifdef __wasm__
+    vr_web_capture(view, plat, vr_cam, vr_keep, vr_changed);
+#endif
 }
 
 
@@ -1096,6 +1189,19 @@ void sub_004ff3b0(CPU *c){
     MR32(self + TXT_LEN) = n;
     if (n) fprintf(stderr, "[profile] a new profile's name starts as Your name (NFSU2_NEW_PROFILE_NAME), not the game's default\n");
     else fprintf(stderr, "[profile] a new profile's name starts empty: the game's default in this language (%u bytes) is no name its field makes\n", len);
+}
+
+/* The package renderer encloses FEng's own draw calls. Screen-space weather
+ * and post-processing use other paths, even when their matrices match UI. */
+void sub_00536520_orig(CPU *c);
+void sub_00536520(CPU *c){
+#ifdef __wasm__
+    vr_web_ui_begin();
+#endif
+    sub_00536520_orig(c);
+#ifdef __wasm__
+    vr_web_ui_end();
+#endif
 }
 
 /* --- sub_0050b410: FEng's level sorter, more than 512 objects a package ---

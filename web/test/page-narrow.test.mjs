@@ -23,14 +23,14 @@ import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 import { chromium } from 'playwright';
 import { pickBrowser } from '../tools/browser.mjs';
-import { serverCommand, SERVER_BIN } from '../tools/server-cmd.mjs';
+import { serverCommand, waitForServer, SERVER_BIN } from '../tools/server-cmd.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PORT = +(process.env.NFSU2_TEST_PAGE_PORT || 8534);
 const WIDTH = 320;
 /** each tab measured: [the panel, its tab, the Controls sheet's tab in it] */
 const VIEWS = [['settings', 'saves'], ['settings', 'online'], ['settings', 'friends'], ['settings', 'game'],
-  ['settings', 'controls', 'keys'], ['settings', 'controls', 'pad'], ['settings', 'controls', 'site'], ['settings', 'mods'],
+  ['settings', 'controls', 'keys'], ['settings', 'controls', 'pad'], ['settings', 'controls', 'site'], ['settings', 'mods'], ['settings', 'vr'],
   ['about', 'credits'], ['about', 'translations']];
 const out = await esbuild.build({ entryPoints: [path.join(HERE, '../src/app/i18n.ts')], bundle: true, write: false, format: 'esm', platform: 'neutral' });
 const { LANGUAGES } = await import('data:text/javascript;base64,' + Buffer.from(out.outputFiles[0].text).toString('base64'));
@@ -41,7 +41,10 @@ const SKIP = !fs.existsSync(path.join(HERE, '../dist/main.js')) ? 'no page built
  *  page as web/dist has it, so an older build would measure the old stylesheet and text, not this checkout's. */
 function newerSource() {
   const web = path.join(HERE, '..');
-  const built = Math.min(...['main.js', 'main.css', 'index.html'].map(f => fs.statSync(path.join(web, 'dist', f), { throwIfNoEntry: false }))
+  // Windows preserves index.html's source timestamp when copying it. Compare
+  // its contents and use the generated bundles to date the completed build.
+  if (!fs.readFileSync(path.join(web, 'index.html')).equals(fs.readFileSync(path.join(web, 'dist/index.html')))) return 'web/index.html';
+  const built = Math.min(...['main.js', 'main.css'].map(f => fs.statSync(path.join(web, 'dist', f), { throwIfNoEntry: false }))
     .filter(Boolean).map(s => s.mtimeMs));
   const src = ['index.html', 'build.mjs', '../app/registry-defaults.txt', '../CHANGELOG.md', ...fs.readdirSync(path.join(web, 'src'), { recursive: true }).map(f => path.join('src', String(f)))];
   let newest = '', at = built;
@@ -61,19 +64,15 @@ async function server() {
     fs.writeFileSync(path.join(data, 'SPEED2.EXE'), 'MZ');
   }
   const srv = spawn(...serverCommand(['--data', data, '--http-port', String(PORT), '--state', path.join(tmp, 'state')]), { stdio: ['ignore', 'pipe', 'pipe'] });
-  await new Promise((res, rej) => {
-    let o = '';
-    const t = setTimeout(() => rej(new Error('server did not start: ' + o)), 15000);
-    srv.stdout.on('data', d => { o += d; if (o.includes('  access    :')) { clearTimeout(t); res(); } });
-    srv.on('exit', c => { clearTimeout(t); rej(new Error('server exited ' + c + ' ' + o)); });
-  });
-  return {
+  const running = {
     stop: async () => {
-      const gone = srv.exitCode !== null || srv.signalCode !== null ? null : new Promise(r => srv.once('exit', r));
+      const gone = !srv.pid || srv.exitCode !== null || srv.signalCode !== null ? null : new Promise(r => srv.once('exit', r));
       srv.kill(); await gone;
       fs.rmSync(tmp, { recursive: true, force: true });
     },
   };
+  try { await waitForServer(srv, PORT); } catch (error) { await running.stop(); throw error; }
+  return running;
 }
 
 /** In the page: how much wider than the screen it is, and the boxes and text that reach past the screen's edges or
@@ -155,8 +154,9 @@ async function look(browser, kind, touch) {
       for (const shown of ['as it is', 'everything shown']) {
         await page.evaluate(all => {
           for (const d of document.querySelectorAll('.app details')) d.open = true;
-          // (a tab's pane is the tabs' to show)
-          if (all) window.__shown = [...document.querySelectorAll('.app [hidden]:not(.tab-panel):not(.pane)')].map(el => { el.hidden = false; return el; });
+          // A tab owns its pane. The password-manager username is structural
+          // form metadata and is never offered as a visible player control.
+          if (all) window.__shown = [...document.querySelectorAll('.app [hidden]:not(.tab-panel):not(.pane):not(input[autocomplete="username"])')].map(el => { el.hidden = false; return el; });
         }, shown === 'everything shown');
         for (const [panel, tab, sub] of VIEWS) {
           await page.click(`#${panel} > .tabs > .tab[data-tab="${tab}"]`);

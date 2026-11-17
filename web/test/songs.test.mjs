@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
-const entry = `export * from './web/src/host/datacache.ts';`;
+const entry = `export * from './web/src/host/datacache.ts';export {resolveEnv,DEFAULTS} from './web/src/app/settings.ts';`;
 const js = (await esbuild.build({ stdin: { contents: entry, resolveDir: ROOT, loader: 'ts' }, bundle: true, format: 'esm', write: false, platform: 'neutral' })).outputFiles[0].text;
 const D = await import('data:text/javascript;base64,' + Buffer.from(js).toString('base64'));
 
@@ -42,4 +42,12 @@ test('a folder without the original songs: the folder\'s, whatever the setting',
   const files = ['pfdata/MusicSFx.mus', 'pfdata/MusicSFx.mpf', 'TRACKS/L4RA.BUN'].map(p => ({ path: p, size: 10, mtime: 1 }));
   assert.deepEqual(D.aheadFiles(files, 'english', { texpack: '', songs: 'original' }).map(x => x.path).sort(),
     ['TRACKS/L4RA.BUN', 'pfdata/MusicSFx.mpf', 'pfdata/MusicSFx.mus']);
+});
+
+
+test('the native retail soundtrack is the default while an explicit restored choice survives',()=>{
+  assert.equal(D.DEFAULTS.get('songs'),'original');
+  assert.equal(D.resolveEnv('',{},{}).env.NFSU2_SONGS,'original');
+  assert.equal(D.resolveEnv('songs = uncensored',{},{}).env.NFSU2_SONGS,'uncensored');
+  assert.equal(D.resolveEnv('songs = original',{NFSU2_SONGS:'uncensored'},{}).env.NFSU2_SONGS,'uncensored');
 });

@@ -73,6 +73,25 @@ function fakeProc() {
 // a ring as the module makes it: the page refuses one of another size (audio/index.ts)
 const RING = AP.AR_OFF_PCM + AP.AUDIO_RING_FRAMES * 8;
 
+test('audio: live master trim is bounded, combines with volume and stays muted while hidden',async t=>{
+  let trim=6;
+  const param={value:1,setTargetAtTime(v){this.value=v;}},ctx={
+    sampleRate:44100,state:'running',baseLatency:0,outputLatency:0,currentTime:0,destination:{},onstatechange:null,
+    audioWorklet:{addModule:async()=>{}},createGain:()=>({gain:param,connect(){}}),
+    async close(){this.state='closed';},async resume(){},
+  };
+  const audio=await attachAudio(fakeProc(),{context:ctx,volume:.5,masterGainDB:()=>trim,gestureTarget:win,log:()=>{}});
+  t.after(()=>{doc.hidden=false;audio.detach();});
+  assert.ok(Math.abs(param.value-.5*10**(.3))<1e-9);
+  trim=-6;await tick(230);assert.ok(Math.abs(param.value-.5*10**(-.3))<1e-9);
+  doc.hidden=true;doc.dispatchEvent({type:'visibilitychange'});assert.equal(param.value,0);
+  trim=99;await tick(230);assert.equal(param.value,0);
+  doc.hidden=false;doc.dispatchEvent({type:'visibilitychange'});assert.ok(Math.abs(param.value-.5*10**(.6))<1e-9);
+  trim=NaN;await tick(230);assert.equal(param.value,.5);
+  audio.setVolume(0);assert.equal(param.value,0);
+  audio.detach();trim=12;await tick(230);assert.equal(param.value,0);
+});
+
 test('audio: detach ends the worklet (stop, then close after it stopped) and leaves nothing on the context', async (t) => {
   const made = [];
   g.AudioWorkletNode = class {
@@ -169,6 +188,48 @@ const events = (proc, ptr, h) => {
   return out;
 };
 const element = () => Object.assign(new Target(), { style: {}, tabIndex: 0, getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }) });
+
+test('input: a visible headset runs without window focus; system menus pause and exit restores flat focus',async t=>{
+  const proc=fakeProc(),ptr=8192,h=mailbox(proc,ptr),focused=doc.hasFocus;
+  doc.hasFocus=()=>false;
+  const i=attachInput(proc,element(),{log:()=>{},gamepads:false});
+  t.after(()=>{i.detach();doc.hasFocus=focused;doc.hidden=false;});
+  proc.register(3,ptr,65536);await tick();
+  const focusEvents=()=>{
+    const u8=new Uint8Array(proc.memory.buffer),words=new Int32Array(proc.memory.buffer),out=[];
+    for(let n=0;n<h[IP.IM_EV_W];n++){const at=ptr+IP.IM_OFF_EV+n*16;if(u8[at]===IP.IEV_FOCUS)out.push(words[(at+8)/4]);}
+    return out;
+  };
+  assert.deepEqual(focusEvents(),[0]);i.immersiveFocus(true);assert.deepEqual(focusEvents(),[0,1]);
+  win.dispatchEvent({type:'blur'});doc.hidden=true;doc.dispatchEvent({type:'visibilitychange'});
+  assert.deepEqual(focusEvents(),[0,1],'the hidden browser surface does not park a visible headset');
+  i.immersiveFocus(false);win.dispatchEvent({type:'focus'});doc.hidden=false;doc.dispatchEvent({type:'visibilitychange'});
+  assert.deepEqual(focusEvents(),[0,1,0],'window events do not steal focus from the Quest system menu');
+  i.immersiveFocus(true);i.immersiveFocus(null);assert.deepEqual(focusEvents(),[0,1,0,1,0]);
+  doc.hasFocus=()=>true;win.dispatchEvent({type:'focus'});assert.equal(focusEvents().at(-1),1);
+  i.immersiveFocus(true);win.dispatchEvent({type:'pagehide'});assert.equal(focusEvents().at(-1),0);
+  i.detach();const n=h[IP.IM_EV_W];i.immersiveFocus(true);assert.equal(h[IP.IM_EV_W],n);
+});
+
+test('input: headset focus arriving before the input mailbox is retained on attachment',async t=>{
+  const proc=fakeProc(),ptr=8192,h=mailbox(proc,ptr),focused=doc.hasFocus;doc.hasFocus=()=>false;
+  const i=attachInput(proc,element(),{log:()=>{},gamepads:false});
+  t.after(()=>{i.detach();doc.hasFocus=focused;});
+  i.immersiveFocus(true);proc.register(3,ptr,65536);await tick();
+  assert.deepEqual(events(proc,ptr,h),[],'the game starts active and must not receive a stale window deactivation');
+});
+
+test('input: text snapshots keep the full length and never publish a half-written field',async()=>{
+  const proc=fakeProc(),ptr=8192,h=mailbox(proc,ptr),i=attachInput(proc,element(),{log:()=>{},gamepads:false});
+  proc.register(3,ptr,65536);await tick();
+  const bytes=new Uint8Array(proc.memory.buffer,ptr+IP.IM_TEXT*4,IP.INPUT_TEXT_BYTES);bytes.fill(65);
+  h[IP.IM_TEXT_MAX]=255;h[IP.IM_TEXT_KIND]=0;h[IP.IM_TEXT_LEN]=120;h[IP.IM_TEXT_SEQ]=2;
+  assert.deepEqual(i.textEntry(),{max:255,kind:0,text:'A'.repeat(96),length:120});
+  h[IP.IM_TEXT_SEQ]=3;h[IP.IM_TEXT_KIND]=5;h[IP.IM_TEXT_LEN]=3;bytes.fill(0);bytes.set([88,89,90]);
+  assert.equal(i.textEntry().length,120,'an odd seqlock keeps the last complete snapshot');
+  h[IP.IM_TEXT_SEQ]=4;assert.deepEqual(i.textEntry(),{max:255,kind:5,text:'XYZ',length:3});
+  h[IP.IM_TEXT_MAX]=0;h[IP.IM_TEXT_SEQ]=6;assert.equal(i.textEntry(),null);i.detach();
+});
 
 test('input: a quit requested before the mailbox registers is sent when it does', async () => {
   const proc = fakeProc(), ptr = 8192, h = mailbox(proc, ptr), logs = [];

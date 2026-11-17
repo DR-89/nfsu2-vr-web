@@ -787,6 +787,17 @@ static int hd_gpack(void){
     return v;
 }
 int ps_to_msl_ex2(const VSProg *p, int id, char *out, size_t cap, unsigned cubemask, int reflk);
+unsigned ps_texture_stages(const VSProg *p){
+    if (!p || !p->is_ps) return 0;
+    unsigned mask = 0;
+    for (unsigned i = 0; i < p->n; i++) {
+        const VSIns *x = &p->ins[i];
+        if (x->op != O_TEX && x->op != O_TEXLDD && x->op != O_TEXLDL) continue;
+        unsigned stage = (unsigned)RN(x->nsrc >= 2 ? x->src[1] : x->dst);
+        if (stage < 4) mask |= 1u << stage;
+    }
+    return mask;
+}
 int ps_to_msl_ex(const VSProg *p, int id, char *out, size_t cap, unsigned cubemask){
     return ps_to_msl_ex2(p, id, out, cap, cubemask, -1);
 }

@@ -108,12 +108,15 @@ static const struct lang { const char *key, *reg; uint32_t fonts; int thai; } LA
 };
 static const struct lang *g_lang = &LANGS[0];
 static int g_subtitles = 1;       /* NFSU2_SUBTITLES */
+static int g_pack_files;
 static int g_english_pack;        /* English's text is its pack's, with the movies' lines whole */
 static const uint32_t THAI_FONTS[4] = { 0x4815619du, 0xa87927beu, 0xa73823ffu, 0xbbba71c2u };
 
 const char *language_registry(void){ return g_lang->reg; }
 /* The language played, as NFSU2_LANGUAGE names it ("english" ... "portuguese") */
 const char *language_name(void){ return g_lang->key; }
+/* Page text uses a custom glyph map only when its language pack is installed. */
+const char *language_font_map(void){ return g_pack_files ? g_lang->key : ""; }
 
 /* The game's text for a hash in the language it plays in: 0x4ff9d0's binary
  * search over the loaded strings ([0x8383d8]: { hash, text } sorted by hash,
@@ -337,7 +340,7 @@ void language_install(void){
     if (v && (v[0] == '0' || !strcasecmp(v, "off") || !strcasecmp(v, "no"))) g_subtitles = 0;
 
     char pack[64]; snprintf(pack, sizeof pack, "LANGPACKS/%s", g_lang->key);
-    int files = fileio_set_language_pack(pack);
+    int files = g_pack_files = fileio_set_language_pack(pack);
     if (g_lang == &LANGS[0]){
         g_english_pack = files > 0;
         if (files) fprintf(stderr, "language: english, %s: the movies' subtitles%s\n", pack, g_subtitles ? "" : " (off)");

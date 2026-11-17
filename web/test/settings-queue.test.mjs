@@ -1,0 +1,20 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {fileURLToPath} from 'node:url';
+import * as esbuild from 'esbuild';
+const code=(await esbuild.build({stdin:{contents:`export {SettingsFile} from './src/app/settings-store';export {editStance} from './src/vr/stance-settings';export {putKey,resolveEnv} from './src/app/settings';`,resolveDir:fileURLToPath(new URL('..',import.meta.url)),loader:'ts'},bundle:true,format:'esm',write:false,plugins:[{name:'fs',setup(b){b.onResolve({filter:/^\.\/savefs$/},()=>({path:'fs',namespace:'stub'}));b.onLoad({filter:/.*/,namespace:'stub'},()=>({contents:'export const readText=(...a)=>globalThis.settingsFS.read(...a),writeFile=(...a)=>globalThis.settingsFS.write(...a);'}));}}]})).outputFiles[0].text;
+const V=await import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
+test('website and cockpit edits read the newest settings after pending writes; failed saves release the queue',async()=>{
+  let text='stance = on\n',release;const written=[];
+  globalThis.settingsFS={read:async()=>text,write:async(_dir,_name,next)=>{written.push(next);if(written.length===1)await new Promise(r=>release=r);text=next;}};
+  const f=new V.SettingsFile(()=>'/save',()=>{});
+  const a=f.edit(t=>V.editStance(t,{model:'350Z',value:[35,0,0,0,110]}).text);
+  const b=f.edit(t=>V.putKey(t,'vr_led_color','6').text);
+  const c=f.edit(t=>V.editStance(t,{model:'SKYLINE',value:[0,0,5,0,100]}).text);
+  await new Promise(r=>setImmediate(r));assert.equal(written.length,1);release();await Promise.all([a,b,c]);
+  const env=V.resolveEnv(text,{},{}).env;assert.equal(env.NFSU2_VR_LED_COLOR,'6');assert.equal(env.NFSU2_STANCE_MODELS,'v1|350Z:35,0,0,0,110|SKYLINE:0,0,5,0,100');
+  assert.equal(f.text,text);assert.equal(f.forGame,text);
+  globalThis.settingsFS.write=async()=>{throw Error('disk');};await assert.rejects(f.edit(t=>V.putKey(t,'stance','off').text),/disk/);assert.equal(f.text,text);
+  globalThis.settingsFS.write=async(_dir,_name,next)=>{text=next;};await f.edit(t=>V.putKey(t,'vr_led_color','2').text);assert.equal(V.resolveEnv(text,{},{}).env.NFSU2_VR_LED_COLOR,'2');
+  delete globalThis.settingsFS;
+});

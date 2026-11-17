@@ -45,6 +45,9 @@ export const sessionStore = /* @__PURE__ */ storeOf(() => sessionStorage);
 // the page
 /** the language the page showed last (i18n.ts; boot.ts reads it too) */
 export const PAGE_LANGUAGE = 'nfsu2-page-language';
+/** IndexedDB: non-exportable device key and sealed connection-profile claims.
+ * Outside the game save folder, so cloud saves never contain sign-in tokens. */
+export const CONNECTION_AUTH_DB='nfsu2-vr-connection-auth-v1';
 /** the settings panel's open tab (tabs.ts) */
 export const PAGE_TAB = 'nfsu2.page.tab';
 /** this browser's id on the server's LAN (page-id.ts) */
@@ -55,6 +58,8 @@ export const SEEN_SETTINGS = 'nfsu2.seen.settings';
 export const LOG_SALT = 'nfsu2.logsalt';
 /** the render check's verdict on this phone (device.ts) */
 export const DEVICE_RENDER = 'nfsu2.device.render';
+/** Last measured headset viewports and render targets, only in this browser. */
+export const VR_RENDER_PIXELS = 'nfsu2.vr.render-pixels.v1';
 /** the GPU pipelines of earlier sessions, made ahead as their shaders arrive (gpu/index.ts, as JSON) */
 export const GPU_PIPELINES = 'nfsu2.gpu.pipelines.v1';
 /** + the save folder: the log of a game the page did not get to end (lastgame.ts, as JSON) */
@@ -73,13 +78,17 @@ export const PLAY_LAST = 'nfsu2.play.last';
 export const PLAY_FROM = 'nfsu2.play.from';
 
 // the radio (radio.ts)
+/** IndexedDB stores directory handles only; these never enter cloud profiles. */
+export const MEDIA_FOLDER_DB = 'nfsu2.radio';
+export const RADIO_FOLDER = 'folder';
+export const MEDIA_FOLDER = 'media-folder';
 /** {path in the folder: mode} without the All ones */
 export const RADIO_MODES = 'nfsu2.radio.modes';
 /** '1': left on */
 export const RADIO_ON = 'nfsu2.radio.on';
 /** [path of the next track of the menus, of driving] */
 export const RADIO_NEXT = 'nfsu2.radio.next';
-/** '1': at random */
+/** '0': folder order; absent or '1': shuffled rounds */
 export const RADIO_SHUFFLE = 'nfsu2.radio.shuffle';
 
 // Last.fm (lastfm.ts): the keys starting with LASTFM_SESSION are all Last.fm's (lastfm-ui.ts hears of them)
@@ -137,3 +146,8 @@ export const CLAIM_TRIED = 'nfsu2-claim-tried:';
 export const OTHER_BUILD = 'nfsu2-other-build';
 /** the server's version this tab reloaded for (shell.ts) */
 export const UPDATE_FOR = 'nfsu2-update';
+
+/** Per-run local haptics capability; sessionStorage only, never a cloud profile. */
+export const VR_HAPTICS_BRIDGE = 'nfsu2.vr.haptics-bridge.v1';
+/** This normal browser profile connects to its locally installed PCVR haptics helper. */
+export const VR_HAPTICS_AUTO = 'nfsu2.vr.haptics-auto.v1';

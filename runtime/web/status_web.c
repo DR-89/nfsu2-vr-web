@@ -215,6 +215,18 @@ int sms_delivered(void);
  * are in free roam (roam_game_nocount: a car meet, and they have not stayed),
  * so quick chat's picker dims it (web/src/app/quickchat.ts) */
 int roam_game_nocount(void);
+int roam_game_alone(void);
+uint32_t roam_game_name_hash(void);
+/* Connection profiles may change in the paused career world, but never during
+ * an outrun, multiplayer lobby, loading screen or race. */
+static void profile_state(int driving, int paused){
+    static int ready_slot = -2, name_slot = -2;
+    if (ready_slot == -2){ ready_slot = host_status_slot("profile_roam"); name_slot = host_status_slot("roam_name"); }
+    int ready = ((driving & 3) == 2 || paused) && roam_exploring() &&
+                mem_is_committed(G_GAMEMODE + 3u) && MR32(G_GAMEMODE) == 1u && roam_game_alone();
+    if (ready_slot >= 0) host_status_set(ready_slot, ready);
+    if (name_slot >= 0) host_status_set(name_slot, roam_game_name_hash());
+}
 void status_web_frame(void){
     static int slot = -2, last = -1, rslot = -2, rlast = -1, pslot = -2, plast = -1, sslot = -2, slast = -1, cslot = -2, clast = -1;
     if (slot == -2){ slot = host_status_slot("drive"); rslot = host_status_slot("rate"); pslot = host_status_slot("pause"); sslot = host_status_slot("sms");
@@ -230,6 +242,7 @@ void status_web_frame(void){
     int nc = (v & 3) == 2 && roam_game_nocount();
     if (nc != clast && cslot >= 0){ clast = nc; host_status_set(cslot, nc); }
     roam_state();
+    profile_state(v, p);
     touch_state(v);
 }
 

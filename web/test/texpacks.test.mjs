@@ -56,3 +56,11 @@ test('the preload fetches the crash damage\'s scratches only with it on, the oth
   assert.deepEqual(ahead(true), ['MODPACKS/DAMAGE/SCRATCHES.TPK', 'MODPACKS/PARTS.BIN', 'TRACKS/L4RA.BUN']);
   assert.equal(S.resolveEnv('crash_damage = on\n', {}, {}).env.NFSU2_DAMAGE, '1', 'the setting the page reads');
 });
+
+test('HUD only preserves original maps, with explicit map overrides still honored',()=>{
+  const r=S.resolveEnv('ui_textures = hud\n',{},{}).env;
+  assert.equal(r.NFSU2_UI_TEXTURES,'hud');assert.equal(r.NFSU2_MAP_TEXTURES,undefined);
+  assert.equal(S.uiPack(r.NFSU2_UI_TEXTURES),'uhud');assert.equal(S.uiPack('HUD'),'uhud');
+  assert.equal(S.checkSetting('ui_textures','HUD').ok,true);
+  assert.equal(S.resolveEnv('ui_textures = hud\nNFSU2_MAP_TEXTURES = detailed\n',{},{}).env.NFSU2_MAP_TEXTURES,'detailed');
+});

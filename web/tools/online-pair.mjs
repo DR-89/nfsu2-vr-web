@@ -1,3 +1,7 @@
+import { startVRRaceProbe } from './vr-race-probe.mjs';
+import { startRaceBrowserProbe } from './race-browser-probe.mjs';
+import { startRaceActionsProbe } from './race-actions-probe.mjs';
+import { startRaceUIProbe } from './race-ui-probe.mjs';
 // The game's Online mode between browsers: one to six game instances in
 // headless Chrome pages (separate browser contexts, so separate OPFS) on one
 // local server, logging into the server's own online host (web/server-rs/crates/online)
@@ -48,6 +52,16 @@
 //                    Fails unless the game was told (app: deactivated) and still made frames there (its [status]
 //                    lines, the fps in summary.json), as the game does in a network race.
 //
+// --vr-check with --page app also requires race-car-mapped head/hand poses;
+// only player 2's XR tracking is synthetic. Saves a vr-race.png per player.
+// --race-browser-check with --page app verifies the copied PC catalogue,
+// lobby/roster/readiness snapshots and their removal during the real race.
+// --race-browser-ui drives the host website and guest headset menu (simulated
+// tracking), including their masked password editors, through the same flow.
+// --race-browser-ui-reject also exercises an original wrong-password dialog.
+// --race-browser-actions uses the page command slot for search, passworded
+// create/join, leave/recreate, ready off/on and start (two players, one race).
+//
 // Without --base it starts its own server (web/tools/server-cmd.mjs, --dev, the
 // game folder from --data or NFSU2_DATA; --online-trace <out>/trace.txt) and
 // stops it at the end.
@@ -86,6 +100,9 @@ const PASSWORD = opt('password', 'testpass');
 const WAIT_ROOM = +opt('wait-room', 70000), JOIN_WAIT = +opt('join-wait', 40000);
 const MODES = { circuit: 0, sprint: 1, drag: 2, drift: 3, streetx: 4 };
 const RANKED = argv.includes('--ranked');
+const RACE_UI=argv.includes('--race-browser-ui');
+const RACE_ACTIONS = argv.includes('--race-browser-actions')||RACE_UI;
+if(RACE_ACTIONS&&(PAGE!=='app'||PLAYERS!==2||RANKED||RACES!==1||FILES.length))throw Error('--race-browser-actions requires --page app, two players and one unranked generated race');
 const HORN = argv.includes('--horn');
 // --say: quick chat in the race and on its results (runtime/racehorn.c qc_*; --page app: pressed on the page)
 const SAY = argv.includes('--say');
@@ -189,7 +206,11 @@ function eaLogin(w) {
 function raceFlow(w, host, race, raceMs, inst) {
   const x = race > 1 ? `_r${race}` : '';
   if (race > 1) w(`+0    log === race ${race} ===`);
-  if (host) {
+  if (RACE_ACTIONS) {
+    w('+0    log race-browser-actions');
+    w('+0    waitfng PC_OL_GameRoom.fng 9000');
+    w('+0    log room-actions');
+  } else if (host) {
     w(`+0    dump lobby${x}`);
     w('+0    log create-game');
     w('+0    tap RETURN');
@@ -448,6 +469,9 @@ async function start(i) {
     await page.click('#play');
     w('[online-pair] clicked Play');
   }
+  const vrProof = PAGE === 'app' && argv.includes('--vr-check') ? await startVRRaceProbe(page,i,path.join(dir,'vr-race.png')) : null;
+  const raceProof = PAGE === 'app' && argv.includes('--race-browser-check') ? await startRaceBrowserProbe(page) : null;
+  const actionProof = RACE_UI ? await startRaceUIProbe(page,i,MODE==='streetx'?10:MODES[MODE]??0,dir,undefined,argv.includes('--race-browser-ui-reject')) : RACE_ACTIONS ? await startRaceActionsProbe(page,i,MODE==='streetx'?10:MODES[MODE]??0) : null;
   const timer = setInterval(async () => {
     try {
       const s = await page.evaluate(() => {
@@ -457,7 +481,7 @@ async function start(i) {
       if (s) w(`NETSTAT ${JSON.stringify(s)}`);
     } catch {}
   }, 10000);
-  const r = { i, name: NAMES[i], dir, page, ctx, plog, lines, timer, hidden, exitCode: () => exit, done: null };
+  const r = { i, name: NAMES[i], dir, page, ctx, plog, lines, timer, vrProof, raceProof, actionProof, hidden, exitCode: () => exit, done: null };
   r.done = page.waitForFunction(() => document.title === 'DONE' || window.__nfsu2?.phase === 'exited', null, { timeout: TMO, polling: 1000 })
     .then(() => 'done', () => 'timeout');
   inst.push(r);
@@ -469,6 +493,20 @@ const res = await Promise.all(inst.map(x => x.done));
 console.log(`online-pair: ${inst.map((x, k) => `${x.name} ${res[k]}`).join(', ')} after ${((Date.now() - t0) / 1000).toFixed(0)} s`);
 for (const x of inst) {
   clearInterval(x.timer);
+  if(x.actionProof){
+    const proof=await x.actionProof().catch(()=>null);x.actionEvidence=proof;
+    fs.writeFileSync(path.join(x.dir,'race-actions.json'),JSON.stringify(proof,null,2));
+    if(!proof?.racing||!proof.returned||proof.errors.length||!proof.actions.length||proof.actions.some(a=>a.result!=='accepted')||
+      !(x.i===0?proof.left:proof.readyOff&&proof.readyOn)||
+      (RACE_UI&&x.i===0&&!proof.mobile)||(RACE_UI&&x.i===1&&argv.includes('--race-browser-ui-reject')&&!proof.rejectedPassword))x.lines.push('RACE_ACTION_PROOF_MISSING');
+  }
+  if(x.vrProof){const proof=await x.vrProof().catch(()=>null);x.lines.push('[vr-proof] '+JSON.stringify(proof));if(!proof?.samples || proof.gpuErrors!==0 || (proof.vr && (!proof.wheel || !proof.shifter || !proof.pedals || proof.fingerPoses.length<3)))x.lines.push('VR_PROOF_MISSING');}
+  if(x.raceProof){
+    const proof=await x.raceProof().catch(()=>null);x.raceEvidence=proof;
+    fs.writeFileSync(path.join(x.dir,'race-browser.json'),JSON.stringify(proof,null,2));
+    if(!proof?.catalogMatches||!proof?.list||!proof?.room||proof.roster<PLAYERS||!(x.i===0?proof.startable:proof.ready)||
+      (x.i>0&&!proof.listed)||!proof.racingClear||proof.errors.length)x.lines.push('RACE_BROWSER_PROOF_MISSING');
+  }
   if (res[x.i] === 'timeout') x.lines.push(`TIME LIMIT REACHED: online-pair stopped the run after ${(TMO / 1000).toFixed(0)} s`);
   fs.writeFileSync(path.join(x.dir, 'log.txt'), x.lines.join('\n') + '\n');
   x.plog.end();
@@ -484,6 +522,9 @@ const summary = { players: PLAYERS, mode: MODE, races: RACES, flow: flow ? 'race
 for (const x of inst) {
   const log = fs.readFileSync(path.join(x.dir, 'log.txt'), 'utf8'), has = (re) => re.test(log), n = `i${x.i + 1}`;
   const why = [];
+  if(log.includes('VR_PROOF_MISSING'))why.push(`${n}:no-race-avatars`);
+  if(log.includes('RACE_BROWSER_PROOF_MISSING'))why.push(`${n}:race-browser-snapshot`);
+  if(log.includes('RACE_ACTION_PROOF_MISSING'))why.push(`${n}:race-browser-actions`);
   if (res[x.i] !== 'done') why.push(`${n}:timeout`);
   if (x.exitCode() !== 0) why.push(`${n}:exit=${x.exitCode()}`);
   if (!log.includes('quit at guest frame')) why.push(`${n}:no-quit`);
@@ -534,6 +575,7 @@ for (const x of inst) {
     lanstats: grab(/^\[net\] virtual LAN (stats|at exit)/).slice(-1),
     ...(HIDE?.n === x.i + 1 ? { hidden: x.hidden, background: grab(/^app: (de)?activated|the game keeps running|^\[online-pair\]/) } : {}),
     ...(SAY ? { chat: grab(/^\[(racechat|chat)\] /) } : {}),
+    ...(x.raceEvidence?{raceBrowser:x.raceEvidence}:{}),
     why,
   };
   summary.why.push(...why);
